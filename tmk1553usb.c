@@ -8,9 +8,12 @@
 #ifndef MODULE
 #  define MODULE
 #endif
+
 #include "config.h"
-#include <linux/config.h>
 #include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)
+#include <linux/config.h>
+#endif
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -24,7 +27,14 @@
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/wait.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)
 #include <linux/smp_lock.h>
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0)
+#include <linux/semaphore.h>
+#endif
+
 #ifdef CONFIG_DEVFS_FS
 #include <linux/devfs_fs_kernel.h>
 #endif
@@ -373,7 +383,7 @@ u32 (*TMK_Procs[])(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBu
 #define HIWORD(l)           ((u16)(((u32)(l) >> 16) & 0xFFFF))
 
 /* local function prototypes */
-static int tmk1553busb_ioctl (struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg);
+static long tmk1553busb_ioctl (/*struct inode *inode,*/ struct file *file, unsigned int cmd, unsigned long arg);
 static int tmk1553busb_open (struct inode *inode, struct file *file);
 static int tmk1553busb_release (struct inode *inode, struct file *file);
 
@@ -396,11 +406,11 @@ char intth_run[MAX_DEVICES];
 
 /* semaphores to protect the minor_table structure */
 #ifdef SPIN_LOCK_BLOCKING
-spinlock_t device_lock[MAX_DEVICES];
+spinlock_t __device_lock[MAX_DEVICES];
 #define LOCK_DEVICE(lock) spin_lock_irq(lock)
 #define UNLOCK_DEVICE(lock) spin_unlock_irq(lock)
 #else
-struct semaphore device_lock[MAX_DEVICES];
+struct semaphore __device_lock[MAX_DEVICES];
 #define LOCK_DEVICE(lock) down(lock)
 #define UNLOCK_DEVICE(lock) up(lock)
 #endif
@@ -474,7 +484,7 @@ static struct file_operations tmk1553busb_fops =
   owner:    THIS_MODULE,
 #endif
 
-  ioctl:    tmk1553busb_ioctl,
+  unlocked_ioctl:    tmk1553busb_ioctl,
   open:     tmk1553busb_open,
   release:  tmk1553busb_release,
 };
@@ -543,12 +553,12 @@ static int tmk1553busb_open (struct inode *inode, struct file *file)
 #endif
 
   /* lock our device and get our local data for this minor */
-  LOCK_DEVICE(&device_lock[subminor]);
+  LOCK_DEVICE(&__device_lock[subminor]);
 
   dev = minor_table[subminor];
   if (dev == NULL) //device was removed
   {
-    UNLOCK_DEVICE(&device_lock[subminor]);
+    UNLOCK_DEVICE(&__device_lock[subminor]);
 #ifndef MY_OWNER
     MOD_DEC_USE_COUNT;
 #endif
@@ -562,7 +572,7 @@ static int tmk1553busb_open (struct inode *inode, struct file *file)
   file->private_data = dev;
 
   /* unlock this device */
-  UNLOCK_DEVICE(&device_lock[subminor]);
+  UNLOCK_DEVICE(&__device_lock[subminor]);
 
   return 0;
 }
@@ -585,12 +595,12 @@ static int tmk1553busb_release (struct inode *inode, struct file *file)
     return -ENODEV;
   }
 
-  LOCK_DEVICE(&device_lock[subminor]);
+  LOCK_DEVICE(&__device_lock[subminor]);
 //  dev = (struct tmk1553busb *)file->private_data;
   dev = minor_table[subminor];
   if (dev == NULL)
   {
-    UNLOCK_DEVICE(&device_lock[subminor]);
+    UNLOCK_DEVICE(&__device_lock[subminor]);
     return -ENODEV;
   }
 
@@ -625,7 +635,7 @@ exit1:
     dev->curproc = 0;
   }
 exit2:
-  UNLOCK_DEVICE(&device_lock[subminor]);
+  UNLOCK_DEVICE(&__device_lock[subminor]);
 #ifndef MY_OWNER
   MOD_DEC_USE_COUNT;
 #endif
@@ -635,9 +645,10 @@ exit2:
 /*
  *  tmk1553busb_ioctl
  */
-static int tmk1553busb_ioctl (struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
+static long tmk1553busb_ioctl (/*struct inode *inode,*/ struct file *file, unsigned int cmd, unsigned long arg)
 {
   struct tmk1553busb * dev;
+  struct inode *inode = file->f_inode;
   int err = 0;
   int subminor = MINOR (inode->i_rdev) - TMK1553BUSB_MINOR_BASE;
   u32 dwService;
@@ -732,18 +743,18 @@ static int tmk1553busb_ioctl (struct inode *inode, struct file *file, unsigned i
     break;
   }
 
-  LOCK_DEVICE(&device_lock[subminor]);
+  LOCK_DEVICE(&__device_lock[subminor]);
   dev = minor_table[subminor];
 //  dev = (struct tmk1553busb *)file->private_data;
   if (dev == NULL)
   {
-    UNLOCK_DEVICE(&device_lock[subminor]);
+    UNLOCK_DEVICE(&__device_lock[subminor]);
     return -ENODEV;
   }
   /* verify that the device wasn't unplugged */
   if (dev->udev == NULL)
   {
-    UNLOCK_DEVICE(&device_lock[subminor]);
+    UNLOCK_DEVICE(&__device_lock[subminor]);
     return -ENODEV;
   }
 
@@ -752,7 +763,7 @@ static int tmk1553busb_ioctl (struct inode *inode, struct file *file, unsigned i
   err = tmkError_usb[dev->minor];
 
   /* unlock the device */
-  UNLOCK_DEVICE(&device_lock[subminor]);
+  UNLOCK_DEVICE(&__device_lock[subminor]);
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: ioctl: error %d\n",err);
 #endif
@@ -1053,11 +1064,11 @@ nextdev:
 #ifdef _LINUX_2_4_
   for (minor = 0; minor < MAX_DEVICES; ++minor)
   {
-    LOCK_DEVICE(&device_lock[minor]);
+    LOCK_DEVICE(&__device_lock[minor]);
     if (minor_table[minor] == NULL)
       break;//found free minor
     else
-      UNLOCK_DEVICE(&device_lock[minor]);
+      UNLOCK_DEVICE(&__device_lock[minor]);
   }
 
   if (minor >= MAX_DEVICES)
@@ -1239,7 +1250,7 @@ nextdev:
 #endif
 
 //start thread
-  init_MUTEX_LOCKED(&dev->startstopth_sem);
+  sema_init(&dev->startstopth_sem,0);
 
 #ifdef _LINUX_2_4_
   tq.sync = 0;
@@ -1303,7 +1314,7 @@ error:
   dev = NULL;
 
 exit:
-  UNLOCK_DEVICE(&device_lock[minor]);
+  UNLOCK_DEVICE(&__device_lock[minor]);
 #ifdef _LINUX_2_4_
   return dev;
 #endif
@@ -1323,7 +1334,7 @@ void kthread_launcher(void *data)
 {
   struct tmk1553busb * arg = data;
 #ifdef _LINUX_2_6_
-  daemonize("thread_launcher", 0);
+  //daemonize("thread_launcher", 0);
 #endif
   kernel_thread((int (*)(void *))int_thread, (void *)arg,
                 CLONE_FILES | CLONE_FS |
@@ -1577,7 +1588,7 @@ static void tmk1553busb_disconnect(struct usb_interface *interface)
 #endif
   intth_run[minor] = 0;
 
-  LOCK_DEVICE(&device_lock[minor]);
+  LOCK_DEVICE(&__device_lock[minor]);
 
 #ifdef _LINUX_2_6_
   dev = minor_table[minor];
@@ -1608,7 +1619,7 @@ static void tmk1553busb_disconnect(struct usb_interface *interface)
     tmkdone_usb(minor);
     tmk1553busb_delete (dev);
   }
-  UNLOCK_DEVICE(&device_lock[minor]);
+  UNLOCK_DEVICE(&__device_lock[minor]);
 
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: USB device #%d now disconnected\n", minor);
@@ -1627,9 +1638,9 @@ static int __init tmk1553busb_init(void)
   for(result = 0; result < MAX_DEVICES; ++result)
   {
 #ifdef SPIN_LOCK_BLOCKING
-    spin_lock_init(&device_lock[result]);
+    spin_lock_init(&__device_lock[result]);
 #else
-    sema_init(&device_lock[result], 1);
+    sema_init(&__device_lock[result], 1);
 #endif
   }
 
@@ -1658,7 +1669,7 @@ static int __init tmk1553busb_init(void)
   printk(KERN_INFO "tmk1553busb: usb_register success\n");
 #endif
 
-  info(DRIVER_DESC " " DRIVER_VERSION);
+  printk(DRIVER_DESC " " DRIVER_VERSION);
   return 0;
 }
 
@@ -1842,12 +1853,12 @@ u32 TMK_tmkwaitevents(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
         tmkMyEvents |= (dev->event) << i;
       continue;
     }//block & search
-    LOCK_DEVICE(&device_lock[i]);
+    LOCK_DEVICE(&__device_lock[i]);
     if(!minor_table[i] || minor_table[i]->curproc != current->pid)
       hUserEvents = hUserEvents & ~(1 << i);
     else
       tmkMyEvents |= (minor_table[i]->event) << i;
-    UNLOCK_DEVICE(&device_lock[i]);
+    UNLOCK_DEVICE(&__device_lock[i]);
   }
 
   fWait = *((int*)(awIn+2));
@@ -1887,12 +1898,12 @@ u32 TMK_tmkwaitevents(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
           tmkMyEvents |= (dev->event) << i;
         continue;
       }//block & search
-      LOCK_DEVICE(&device_lock[i]);
+      LOCK_DEVICE(&__device_lock[i]);
       if(!minor_table[i] || minor_table[i]->curproc != current->pid)
         hUserEvents = hUserEvents & ~(1 << i);
       else
         tmkMyEvents |= (minor_table[i]->event) << i;
-      UNLOCK_DEVICE(&device_lock[i]);
+      UNLOCK_DEVICE(&__device_lock[i]);
     }
 //    for(i = 0; i < MAX_DEVICES; ++i)
 //      if(hUserEvents & (1 << i))
@@ -1904,12 +1915,12 @@ u32 TMK_tmkwaitevents(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
     {
       break;
     }
-    UNLOCK_DEVICE(&device_lock[tmkNumber]);
+    UNLOCK_DEVICE(&__device_lock[tmkNumber]);
     if (fWait > 0)
       timeout = schedule_timeout(timeout);
     else
       schedule();
-    LOCK_DEVICE(&device_lock[tmkNumber]);
+    LOCK_DEVICE(&__device_lock[tmkNumber]);
     if ((fSignal = signal_pending(current)) != 0)
     {
 #ifdef TMK1553BUSB_DEBUG

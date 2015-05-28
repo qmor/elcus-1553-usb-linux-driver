@@ -61,7 +61,7 @@
 #endif
 
 #ifdef LINUX
-#include <linux/config.h>
+//#include <linux/config.h>
 #ifdef CONFIG_SMP
 #define __SMP__
 #endif
