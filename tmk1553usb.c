@@ -33,6 +33,7 @@
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0)
 #include <linux/semaphore.h>
+#include <linux/kthread.h>
 #endif
 
 #ifdef CONFIG_DEVFS_FS
@@ -1269,10 +1270,13 @@ nextdev:
   }
 #endif
 #ifdef _LINUX_2_6_
-  kernel_thread((int (*)(void *))kthread_launcher, (void *)dev,
-                CLONE_FILES | CLONE_FS |
-                CLONE_SIGHAND);
+  // kernel_thread((int (*)(void *))kthread_launcher, (void *)dev,
+  //               CLONE_FILES | CLONE_FS |
+  //               CLONE_SIGHAND);
+
+   kthread_run((int (*)(void *))kthread_launcher, (void *)dev, "Elcus_1553usb_thread");
 #endif
+
   down(&dev->startstopth_sem);
 
 #ifdef CONFIG_DEVFS_FS
@@ -1336,9 +1340,13 @@ void kthread_launcher(void *data)
 #ifdef _LINUX_2_6_
   //daemonize("thread_launcher", 0);
 #endif
-  kernel_thread((int (*)(void *))int_thread, (void *)arg,
-                CLONE_FILES | CLONE_FS |
-                CLONE_SIGHAND);
+  // kthread_run((int (*)(void *))kthread_launcher, (void *)dev, "Elcus_1553usb_thread");
+  // kernel_thread((int (*)(void *))int_thread, (void *)arg,
+  //               CLONE_FILES | CLONE_FS |
+  //               CLONE_SIGHAND);
+
+kthread_run((int (*)(void *))int_thread, (void *)arg,
+            "Elcus_1553usb_thread");
 }
 
 void int_thread(struct tmk1553busb * dev)
