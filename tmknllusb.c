@@ -44,6 +44,28 @@
 // - tmktimer single loop fixed
 #include "config.h"
 
+#define WRITE_RG	0
+#define READ_RG		1
+#define WRITE_MEM	2
+#define READ_MEM	3
+#define MOD_RG_AND	4
+#define MOD_RG_OR	5
+#define MOD_MEM_AND	6
+#define MOD_MEM_OR	7
+#define WRITE_PARAM	10
+#define READ_PARAM	11
+
+#define PARAM_MODE		1
+#define PARAM_BCBASEBUS		2
+#define PARAM_BCXSTART		4
+#define PARAM_MTCW		5
+#define PARAM_BCAW1		6
+#define PARAM_BCAW2		7
+#define PARAM_BCAW1POS		8
+#define PARAM_BCAW2POS		9
+#define PARAM_BCLINKBASEN	10
+#define PARAM_BCLINKCCN		11
+
 #ifndef NOT_INCLUDE_DEFS
 #include "tmkndefs.h"
 #endif
@@ -61,7 +83,9 @@
 #endif
 
 #ifdef LINUX
-//#include <linux/config.h>
+#ifndef TMK1553B_NOCONFIGH
+#include <linux/config.h>
+#endif 
 #ifdef CONFIG_SMP
 #define __SMP__
 #endif
@@ -151,7 +175,7 @@
 #define TA_DATA(i)     (__tmkPortsAddr1_usb[i]+0xE)
 #define TA_TIMER1(i)   (__tmkPortsAddr1_usb[i]+0x10)
 #define TA_TIMER2(i)   (__tmkPortsAddr1_usb[i]+0x12)
-#define AdrRAO(i)      (__tmkPortsAddr1_usb[i]+0x14)
+#define TA_RTA(i)      (__tmkPortsAddr1_usb[i]+0x14)
 #define TA_TIMCR(i)    (__tmkPortsAddr1_usb[i]+0x18)
 #define TA_LCW(i)      (__tmkPortsAddr1_usb[i]+0x1A)
 #define TA_MSGA(i)     (__tmkPortsAddr1_usb[i]+0x1C)
@@ -417,9 +441,7 @@ U16 __bcControls1_usb[NTMK];
 U16 __bcControls_usb[NTMK];
 U16 __bcBus_usb[NTMK]; // DUP(0)
 U16 __bcMaxBase_usb[NTMK]; // DUP(0)
-#if DRV_MAX_BASE > 255
 U16 __mtMaxBase_usb[NTMK]; // DUP(0)
-#endif
 U16 __bcBaseBus_usb[NTMK];
 U16 __bcBasePC_usb[NTMK];
 U16 __bcAW1Pos_usb[NTMK];
@@ -498,12 +520,9 @@ U16 __RT_DIS_MASK_usb[DRV_MAX_TYPE+1];
 U16 __RT_BRC_MASK_usb[DRV_MAX_TYPE+1];
 
 U16 __mtCW_usb[NTMK];
-#if DRV_MAX_BASE > 255
+U16 __rtGap_usb[NTMK];
 U16 __bcLinkBaseN_usb[NTMK][DRV_MAX_BASE+1];
 U16 __bcLinkCCN_usb[NTMK][DRV_MAX_BASE+1];
-#else
-U16 __bcLinkWN_usb[NTMK][DRV_MAX_BASE+1];
-#endif
 ////U32 bcLinkWPtr[NTMK];
 ////                DD      bcLinkW0
 ////                IRPC    N, 1234567
@@ -791,15 +810,11 @@ void (FARIR *tmkUserErrors_usb)(void) = retfLabel_usb;
     return USER_ERROR(BC_BAD_BASE); \
 }
 
-#if DRV_MAX_BASE > 255
 #define CHECK_BCMT_BASE_BX(num, base) { \
   if ((__tmkMode_usb[num] == BC_MODE && base > __bcMaxBase_usb[num]) || \
       (__tmkMode_usb[num] != BC_MODE && base > __mtMaxBase_usb[num])) \
     return USER_ERROR(BC_BAD_BASE); \
 }
-#else
-#define CHECK_BCMT_BASE_BX CHECK_BC_BASE_BX
-#endif
 
 #define CHECK_BC_ADDR(addr) { addr &= 0x3F; }
 
@@ -992,9 +1007,6 @@ int FARFN tmkdefdac_usb(
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     return USER_ERROR(TMK_BAD_FUNC);
   }
   return 0;
@@ -1018,15 +1030,66 @@ int FARFN tmkgetdac_usb(
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     *tmkDacValue = 0;
     *tmkDacMode = 0;
     USER_ERROR(TMK_BAD_FUNC);
     break;
   }
   return 0;
+}
+
+U16 rtgap_usb(
+#ifndef STATIC_TMKNUM
+        int __tmkNumber_usb,
+#endif
+        U16 Gap)
+{
+  int realnum;
+  unsigned type;
+  u16 buf_out[7];
+  u16 buf_in[4];
+
+  CLRtmkError;
+  realnum = GET_RealNum;
+  type = __tmkDrvType_usb[realnum];
+  CHECK_TMK_TYPE(type);
+  if (Gap != GET_RT_GAP)
+  {
+    switch (type)
+    {
+    case __TA:
+      if (__tmkHWVer_usb[realnum] < 15)
+        Gap = RT_GAP_DEFAULT;
+      if (Gap > RT_GAP_OPT1)
+        Gap = RT_GAP_OPT1;
+      __rtGap_usb[realnum] = Gap;
+      GET_DIS_IRQ();
+//      outpw(TA_RTA(realnum), (inpw(TA_RTA(realnum)) & (~1 << 11)) | (__rtGap[realnum] << 11));
+      buf_out[0] = MOD_RG_AND;
+      buf_out[1] = TA_RTA(realnum);
+      buf_out[2] = (~1 << 11);
+      buf_out[3] = (__rtGap_usb[realnum] << 11);
+      buf_out[4] = READ_RG;
+      buf_out[5] = TA_BASE(realnum);
+      buf_out[6] = 0xFFFF;
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
+      REST_IRQ();
+      break;
+    }
+  }
+//  switch (type)
+//  {
+//  case __TA:
+//#ifdef MRTA
+//  case __MRTA:
+//#endif
+    Gap = __rtGap_usb[realnum];
+//    break;
+//  default:
+//    Gap = RT_GAP_DEFAULT;
+//    break;
+//  }
+  return Gap;
 }
 
 U16 FARFN tmktimeout_usb(
@@ -1037,7 +1100,8 @@ U16 FARFN tmktimeout_usb(
 {
   int realnum;
   unsigned type;
-  u16 buf_out[5];
+  u16 buf_out[7];
+  u16 buf_in[4];
 
   CLRtmkError;
   realnum = GET_RealNum;
@@ -1049,9 +1113,6 @@ U16 FARFN tmktimeout_usb(
     switch (type)
     {
     case __TA:
-#ifdef MRTA
-    case __MRTA:
-#endif
       if (TimeOut <= 14)
         __tmkTimeOut_usb[realnum] = __TA_14US;
       else if (TimeOut <= 18)
@@ -1064,12 +1125,14 @@ U16 FARFN tmktimeout_usb(
       __rtControls_usb[realnum] = (__rtControls_usb[realnum] & 0xCFFF) | __tmkTimeOut_usb[realnum];
       GET_DIS_IRQ();
 //      outpw(TA_MODE1(realnum), (inpw(TA_MODE1(realnum)) & 0xCFFF) | __tmkTimeOut[realnum]);
-      buf_out[0] = 4;
+      buf_out[0] = MOD_RG_AND;
       buf_out[1] = TA_MODE1(realnum);
       buf_out[2] = 0xCFFF;
       buf_out[3] = __tmkTimeOut_usb[realnum];
-      buf_out[4] = 0xFFFF;
-      Block_out_in(minor_table[realnum], buf_out, NULL);
+      buf_out[4] = READ_RG;
+      buf_out[5] = TA_BASE(realnum);
+      buf_out[6] = 0xFFFF;
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
       REST_IRQ();
       break;
     }
@@ -1077,9 +1140,6 @@ U16 FARFN tmktimeout_usb(
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     switch (__tmkTimeOut_usb[realnum])
     {
     case __TA_63US:
@@ -1114,7 +1174,8 @@ U16 FARFN tmktimer_usb(
 {
   int realnum;
   unsigned type;
-  u16 buf_out[7];
+  u16 buf_out[9];
+  u16 buf_in[4];
   int ptr = 0;
 
   CLRtmkError;
@@ -1125,9 +1186,6 @@ U16 FARFN tmktimer_usb(
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     if (TimerCtrl != GET_TIMER_CTRL)
     {
       if (TimerCtrl != TIMER_RESET)
@@ -1136,17 +1194,19 @@ U16 FARFN tmktimer_usb(
       if (TimerCtrl == TIMER_RESET)
       {
 //        outpw(TA_TIMCR(realnum), 0);
-        buf_out[ptr] = 0;
+        buf_out[ptr] = WRITE_RG;
         buf_out[ptr + 1] = TA_TIMCR(realnum);
         buf_out[ptr + 2] = 0;
         ptr += 3;
       }
 //      outpw(TA_TIMCR(realnum), __tmkTimerCtrl[realnum]);
-      buf_out[ptr] = 0;
+      buf_out[ptr] = WRITE_RG;
       buf_out[ptr + 1] = TA_TIMCR(realnum);
       buf_out[ptr + 2] = __tmkTimerCtrl_usb[realnum];
-      buf_out[ptr + 3] = 0xFFFF;
-      Block_out_in(minor_table[realnum], buf_out, NULL);
+      buf_out[ptr + 3] = READ_RG;
+      buf_out[ptr + 4] = TA_BASE(realnum);
+      buf_out[ptr + 5] = 0xFFFF;
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
       REST_IRQ_SMP();
     }
     return __tmkTimerCtrl_usb[realnum];
@@ -1174,11 +1234,8 @@ U16 FARFN tmkgettimerl_usb(
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
 //    timer = inpw(TA_TIMER2(realnum));
-    buf_out[0] = 1;
+    buf_out[0] = READ_RG;
     buf_out[1] = TA_TIMER2(realnum);
     buf_out[2] = 0xFFFF;
     Block_out_in(minor_table[realnum], buf_out, buf_in);
@@ -1211,22 +1268,19 @@ U32 FARFN tmkgettimer_usb(
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     GET_DIS_IRQ();
 //    outpw(TA_TIMCR(realnum), __tmkTimerCtrl[realnum] | 0x0800);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_TIMCR(realnum);
     buf_out[2] = __tmkTimerCtrl_usb[realnum] | 0x0800;
 //    timer = (U32)inpw(TA_TIMER1(realnum)) << 16;
-    buf_out[3] = 1;
+    buf_out[3] = READ_RG;
     buf_out[4] = TA_TIMER1(realnum);
 //    timer |= (U32)inpw(TA_TIMER2(realnum));
-    buf_out[5] = 1;
+    buf_out[5] = READ_RG;
     buf_out[6] = TA_TIMER2(realnum);
 //    outpw(TA_TIMCR(realnum), __tmkTimerCtrl[realnum]);
-    buf_out[7] = 0;
+    buf_out[7] = WRITE_RG;
     buf_out[8] = TA_TIMCR(realnum);
     buf_out[9] = __tmkTimerCtrl_usb[realnum];
     buf_out[10] = 0xFFFF;
@@ -1266,14 +1320,14 @@ U32 FARFN bcgetmsgtime_usb(
     GET_DIS_IRQ_SMP();
 ////    time = (U32)DrvBcPeekTA(realnum, 59) << 16;
 //    outpw(TA_ADDR(realnum), (__bcBasePC[realnum] << 6) + 59);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_ADDR(realnum);
     buf_out[2] = (__bcBasePC_usb[realnum] << 6) + 59;
 //    time = ((U32)inpw(TA_DATA(realnum)) << 16);
-    buf_out[3] = 1;
+    buf_out[3] = READ_RG;
     buf_out[4] = TA_DATA(realnum);
 //    time |= (U32)inpw(TA_DATA(realnum))
-    buf_out[5] = 1;
+    buf_out[5] = READ_RG;
     buf_out[6] = TA_DATA(realnum);
     buf_out[7] = 0xFFFF;
     Block_out_in(minor_table[realnum], buf_out, buf_in);
@@ -1311,57 +1365,25 @@ U32 FARFN rtgetmsgtime_usb(
   case __TA:
     GET_DIS_IRQ_SMP();
 //    outpw(TA_ADDR(realnum), ((__rtSubAddr[num] | __hm400Page[num]) << 1) | 59);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_ADDR(realnum);
     buf_out[2] = ((__rtSubAddr_usb[num] | __hm400Page_usb[num]) << 1) | 59;
 //    time = (U32)inpw(TA_DATA(realnum)) << 16;
-    buf_out[3] = 1;
+    buf_out[3] = READ_RG;
     buf_out[4] = TA_DATA(realnum);
 //    time |= (U32)inpw(TA_DATA(realnum));
-    buf_out[5] = 1;
+    buf_out[5] = READ_RG;
     buf_out[6] = TA_DATA(realnum);
     buf_out[7] = 0xFFFF;
     Block_out_in(minor_table[realnum], buf_out, buf_in);
     time = ((u32)buf_in[2]) << 16 | (u32)buf_in[5];
     REST_IRQ_SMP();
     break;
-#ifdef MRTA
-  case __MRTA:
-    GET_DIS_IRQ_SMP();
-    outpw(MRTA_ADDR2(realnum), __hm400Page2_usb[num]);
-    outpw(TA_ADDR(realnum), ((__hm400Page_usb[num] | __rtSubAddr_usb[num]) << 1) | 59);
-    time = (U32)inpw(TA_DATA(realnum)) << 16;
-    time |= (U32)inpw(TA_DATA(realnum));
-    REST_IRQ_SMP();
-    break;
-#endif
   default:
     time = 0L;
     break;
   }
   return time;
-}
-
-U16 FARFN tmkiodelay_usb(
-#ifndef STATIC_TMKNUM
-        int __tmkNumber_usb,
-#endif
-        U16 IODelay)
-{
-  int realnum;
-  U16 iodelay;
-
-  CLRtmkError;
-  realnum = GET_RealNum;
-  iodelay = __wInDelay_usb[realnum];
-  if (IODelay != GET_IO_DELAY)
-  {
-    if (IODelay == 0)
-      IODelay = 1;
-    __wInDelay_usb[realnum] = IODelay;
-    __wOutDelay_usb[realnum] = IODelay;
-  }
-  return iodelay;
 }
 
 void FARFN tmkdeferrors_usb(void (FARIR* UserErrors_usb)(void))
@@ -1371,26 +1393,6 @@ void FARFN tmkdeferrors_usb(void (FARIR* UserErrors_usb)(void))
   tmkUserErrors_usb = UserErrors_usb;
 #endif
 }
-
-#if NRT > 0
-int FARFN rt2mrt_usb(int hTMK)
-{
-//;#ifdef   STATIC_TMKNUM
-//;  CLRtmkError;
-//;#endif
-  if ((unsigned)hTMK > __tmkMaxNumber_usb)
-  {
-//;#ifdef   STATIC_TMKNUM
-//;                USER_ERROR(TMK_BAD_NUMBER
-//;#endif
-    return -1;
-  }
-  else
-  {
-    return __amrtNumber_usb[hTMK];
-  }
-}
-#endif //NRT
 
 int FARFN tmkselect_usb(int hTMK)
 {
@@ -1408,15 +1410,6 @@ int FARFN tmkselect_usb(int hTMK)
 }
 
 #ifdef STATIC_TMKNUM
-#if NRT > 0
-//__inline
-int FARFN mrtselected_usb()
-{
-//;  CLRtmkError;
-  return GET_RealNum;
-}
-#endif //NRT
-
 //__inline
 int FARFN tmkselected_usb()
 {
@@ -1432,35 +1425,6 @@ int FARFN tmkgetmaxn_usb()
 //;                mov     eax, NTMK - 1
   return __tmkMaxNumber_usb;
 }
-
-#if NRT > 0
-//__inline
-int FARFN mrtgetmaxn_usb()
-{
-//;  CLRtmkError;
-  return NTMK - 1;
-}
-
-int FARFN mrtgetrt0_usb(
-#ifndef STATIC_TMKNUM
-        int __tmkNumber_usb
-#endif
-        )
-{
-  CLRtmkError;
-  return __mrtMinRT[GET_RealNum];
-}
-
-int FARFN mrtgetnrt_usb(
-#ifndef STATIC_TMKNUM
-        int __tmkNumber_usb
-#endif
-        )
-{
-  CLRtmkError;
-  return __mrtNRT[GET_RealNum];
-}
-#endif //NRT
 
 U16 FARFN tmkgetmode_usb(
 #ifndef STATIC_TMKNUM
@@ -1576,11 +1540,11 @@ void rtcreatlink_usb(int num, unsigned sa, unsigned len)
   GET_DIS_IRQ_SMP();
 ////  DrvRtPokeTA(num, AdrTab, sa, sa|0x4000);
 //  outpw(TA_ADDR(num), (AdrTab << 6) + sa);
-  buf_out[0] = 0;
+  buf_out[0] = WRITE_RG;
   buf_out[1] = TA_ADDR(num);
   buf_out[2] = (AdrTab << 6) + sa;
 //  outpw(TA_DATA(num), sa|0x4000);
-  buf_out[3] = 0;
+  buf_out[3] = WRITE_RG;
   buf_out[4] = TA_DATA(num);
   buf_out[5] = sa|0x4000;
   REST_IRQ_SMP();
@@ -1591,11 +1555,11 @@ void rtcreatlink_usb(int num, unsigned sa, unsigned len)
     GET_DIS_IRQ_SMP();
 ////    DrvRtPokeTA(num, base, 63, next|0x4000);
 //    outpw(TA_ADDR(num), (base << 6) + 63);
-    buf_out[ptr] = 0;
+    buf_out[ptr] = WRITE_RG;
     buf_out[ptr + 1] = TA_ADDR(num);
     buf_out[ptr + 2] = (base << 6) + 63;
 //    outpw(TA_DATA(num), next|0x4000);
-    buf_out[ptr + 3] = 0;
+    buf_out[ptr + 3] = WRITE_RG;
     buf_out[ptr + 4] = TA_DATA(num);
     buf_out[ptr + 5] = next|0x4000;
     REST_IRQ_SMP();
@@ -1605,11 +1569,11 @@ void rtcreatlink_usb(int num, unsigned sa, unsigned len)
   GET_DIS_IRQ_SMP();
 ////  DrvRtPokeTA(num, base, 63, sa|0x4000);
 //  outpw(TA_ADDR(num), (base << 6) + 63);
-  buf_out[ptr] = 0;
+  buf_out[ptr] = WRITE_RG;
   buf_out[ptr + 1] = TA_ADDR(num);
   buf_out[ptr + 2] = (base << 6) + 63;
 //  outpw(TA_DATA(num), sa|0x4000);
-  buf_out[ptr + 3] = 0;
+  buf_out[ptr + 3] = WRITE_RG;
   buf_out[ptr + 4] = TA_DATA(num);
   buf_out[ptr + 5] = sa|0x4000;
   buf_out[ptr + 6] = 0xFFFF;
@@ -1622,32 +1586,32 @@ void rtcreattab_usb(int num, unsigned len)
 {
   unsigned sa;
   u16 buf_out[16];
+  u16 buf_in[4];
 
   if(minor_table[num] == NULL)
     return;
 //  outpw(TA_MSGA(num), AdrTab);
-  buf_out[0] = 0;
+  buf_out[0] = WRITE_RG;
   buf_out[1] = TA_MSGA(num);
   buf_out[2] = AdrTab;
-
   //for MT
   GET_DIS_IRQ_SMP();
 ////  DrvRtPokeTA(num, AdrTab, 0, 0x4000);
 //  outpw(TA_ADDR(num), (AdrTab << 6) + 0);
-  buf_out[3] = 0;
+  buf_out[3] = WRITE_RG;
   buf_out[4] = TA_ADDR(num);
   buf_out[5] = AdrTab << 6;
 //  outpw(TA_DATA(num), 0x4000);
-  buf_out[6] = 0;
+  buf_out[6] = WRITE_RG;
   buf_out[7] = TA_DATA(num);
   buf_out[8] = 0x4000;
 ////  DrvRtPokeTA(num, 0, 63, 0x4000);
 //  outpw(TA_ADDR(num), (0 << 6) + 63);
-  buf_out[9] = 0;
+  buf_out[9] = WRITE_RG;
   buf_out[10] = TA_ADDR(num);
   buf_out[11] = 63;
 //  outpw(TA_DATA(num), 0x4000);
-  buf_out[12] = 0;
+  buf_out[12] = WRITE_RG;
   buf_out[13] = TA_DATA(num);
   buf_out[14] = 0x4000;
   buf_out[15] = 0xFFFF;
@@ -1663,48 +1627,12 @@ void rtcreattab_usb(int num, unsigned len)
   rtcreatlink_usb(num, 0x1F, len); //All Mode Cmds
   rtcreatlink_usb(num, 0x20, len); //Cmd TX VECTOR
   rtcreatlink_usb(num, 0x3F, len); //Cmd TX BIT
+
+  buf_out[0] = READ_RG;
+  buf_out[1] = TA_BASE(num);
+  buf_out[2] = 0xFFFF;
+  Block_out_in(minor_table[num], buf_out, buf_in);
 }
-
-#ifdef MRTA
-void mrtcreatlink_usb(int num, unsigned addr, unsigned sa)
-{
-  unsigned base;
-
-  base = 0x0800 | (addr << 6) | sa;
-  GET_DIS_IRQ_SMP();
-  outpw(MRTA_ADDR2(num), 0);
-//  DrvRtPokeTA(num, addr, sa, base|0x4000);
-  outpw(TA_ADDR(num), (addr << 6) + sa);
-  outpw(TA_DATA(num), base|0x4000);
-  outpw(MRTA_ADDR2(num), base >> 10);
-//  DrvRtPokeTA(num, base, 63, base|0x4000);
-  outpw(TA_ADDR(num), (base << 6) + 63);
-  outpw(TA_DATA(num), base|0x4000);
-  REST_IRQ_SMP();
-}
-
-void mrtcreattab_usb(int num, unsigned addr)
-{
-  unsigned sa;
-
-  //for RT
-  for (sa = 1; sa < 31; ++sa)
-  {
-    mrtcreatlink_usb(num, addr, sa);      //rx sa
-    mrtcreatlink_usb(num, addr, sa|0x20); //tx sa
-  }
-  mrtcreatlink_usb(num, addr, 0x1F); //All Mode Cmds
-  mrtcreatlink_usb(num, addr, 0x20); //Cmd TX VECTOR
-  mrtcreatlink_usb(num, addr, 0x3F); //Cmd TX BIT
-}
-#endif //def MRTA
-
-#if NRT > 0
-unsigned DrvMrtaBrcRtOn_usb(int realnum)
-{
-  return (__dmrtBrc[realnum] != 0L || (__dmrtRT[realnum] & (1L << 31)) != 0L) ? MRTA_RT_ON : 0;
-}
-#endif
 
 int FARFN bcreset_usb(
 #ifndef STATIC_TMKNUM
@@ -1715,18 +1643,14 @@ int FARFN bcreset_usb(
   int realnum;
   unsigned type;
   unsigned cntr = 0;
-  u16 buf_out[19];
-#if NRT > 0
-  unsigned irt;
-  unsigned nrt;
-  int err; // because of tmkError can be switched off
-#endif
+  u16 buf_out[21];
+  u16 buf_in[4];
 
   CLRtmkError;
   realnum = GET_RealNum;
   __tmkMode_usb[realnum] = BC_MODE; //to device
-  buf_out[0] = 10;
-  buf_out[1] = 1;
+  buf_out[0] = WRITE_PARAM;
+  buf_out[1] = PARAM_MODE;
   buf_out[2] = BC_MODE;
   __tmkStarted_usb[realnum] = 0;
   type = __tmkDrvType_usb[realnum];
@@ -1737,116 +1661,35 @@ int FARFN bcreset_usb(
   case __TA:
     GET_DIS_IRQ_SMP();
 //    outpw(TA_RESET(realnum), 0);
-    buf_out[3] = 0;
+    buf_out[3] = WRITE_RG;
     buf_out[4] = TA_RESET(realnum);
     buf_out[5] = 0;
 //    outpw(TA_TIMCR(realnum), 0);
-    buf_out[6] = 0;
+    buf_out[6] = WRITE_RG;
     buf_out[7] = TA_TIMCR(realnum);
     buf_out[8] = 0;
 ////    if (__tmkTimerCtrl[realnum] & TIMER_BITS)
 ////      outpw(TA_TIMCR(realnum), __tmkTimerCtrl[realnum]);
     cntr = (BC_MODE << 7) | (TA_TXRX_EN + TA_IRQ_EN);
 //    outpw(TA_MODE1(realnum), cntr | TA_FIFO_RESET);
-    buf_out[9] = 0;
+    buf_out[9] = WRITE_RG;
     buf_out[10] = TA_MODE1(realnum);
     buf_out[11] = cntr | TA_FIFO_RESET;
 //    outpw(TA_MODE1(realnum), cntr);
-    buf_out[12] = 0;
+    buf_out[12] = WRITE_RG;
     buf_out[13] = TA_MODE1(realnum);
     buf_out[14] = cntr;
     REST_IRQ_SMP();
     __bcControls1_usb[realnum] = TA_STOP_ON_EXC | RRG2_BC_Mask_Rez_Bit;
 //    outpw(TA_MODE2(realnum), __bcControls1[realnum]);
-    buf_out[15] = 0;
+    buf_out[15] = WRITE_RG;
     buf_out[16] = TA_MODE2(realnum);
     buf_out[17] = __bcControls1_usb[realnum];
-    buf_out[18] = 0xFFFF;
-    Block_out_in(minor_table[realnum], buf_out, NULL);
+    buf_out[18] = READ_RG;
+    buf_out[19] = TA_BASE(realnum);
+    buf_out[20] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     break;
-#ifdef MRTA
-  case __MRTA:
-    __tmkMode_usb[realnum] = MRT_MODE;//!!!send
-    err = 0;
-    if (realnum != __tmkNumber)
-    {
-      __tmkMode_usb[__tmkNumber] = RT_MODE;
-#ifdef STATIC_TMKNUM
-      rtenable(RT_DISABLE);
-#else
-      rtenable(__tmkNumber, RT_DISABLE);
-#endif
-      __tmkMode_usb[__tmkNumber] = 0xFFFF;
-      USER_ERROR(TMK_BAD_FUNC);
-#ifdef STATIC_TMKNUM
-      err = tmkError;
-#else
-      err = tmkError[__tmkNumber];
-#endif
-      irt = __mrtMinRT[realnum];
-      nrt = __mrtNRT[realnum];
-      do
-      {
-        if (__tmkMode_usb[irt++] != 0xFFFF)
-        {
-          __hm400Page0_usb[__tmkNumber] = 0;
-          __hm400Page_usb[__tmkNumber] = 0;
-          __hm400Page2_usb[__tmkNumber] = 0;
-          __rtDisableMask_usb[__tmkNumber] = __RT_DIS_MASK_usb[type];
-          __rtBRCMask_usb[__tmkNumber] = __RT_BRC_MASK_usb[type];
-          __rtEnableOnAddr_usb[__tmkNumber] = 1;
-
-          break;
-        }
-      }
-      while (--nrt != 0);
-      if (nrt != 0)
-        return err;
-    }
-    __dmrtRT[realnum] = 0L;
-    __dmrtBrc[realnum] = 0L;
-    __hm400Page0_usb[realnum] = 0;
-    __hm400Page_usb[realnum] = 0;
-    __hm400Page2_usb[realnum] = 0;
-    __rtDisableMask_usb[realnum] = __RT_DIS_MASK_usb[type];
-    __rtBRCMask_usb[realnum] = __RT_BRC_MASK_usb[type];
-    __rtEnableOnAddr_usb[realnum] = 1;
-    __rtControls1_usb[realnum] = TA_HBIT_MODE | TA_BRCST_MODE;
-    __FLAG_MODE_ON_usb[realnum] = 0;
-    __rtControls_usb[realnum] = TA_RT_DATA_INT_BLK + TA_TXRX_EN + TA_BS_MODE_DATA_EN + TA_IRQ_EN;
-    irt = __mrtMinRT[realnum];
-    nrt = __mrtNRT[realnum];
-    do
-    {
-      __tmkMode_usb[irt] = 0xFFFF;
-      __hm400Page0_usb[irt] = 0;
-      __hm400Page_usb[irt] = 0;
-      __hm400Page2_usb[irt] = 0;
-      __rtDisableMask_usb[irt] = __RT_DIS_MASK_usb[type];
-      __rtBRCMask_usb[irt] = __RT_BRC_MASK_usb[type];
-      __rtEnableOnAddr_usb[irt] = 1;
-      __rtControls1_usb[irt] = 0xF800 | TA_HBIT_MODE | TA_BRCST_MODE;
-      __FLAG_MODE_ON_usb[irt] = 0;
-      ++irt;
-    }
-    while (--nrt != 0);
-    GET_DIS_IRQ_SMP();
-    outpw(TA_RESET(realnum), 0);
-    __mrtLastBrcTxRT[realnum] = 0;
-    outpw(TA_TIMCR(realnum), 0);
-//    if (__tmkTimerCtrl[num] & TIMER_BITS)
-//      outpw(TA_TIMCR(realnum), __tmkTimerCtrl[num]);
-    outpw(TA_MODE1(realnum), __rtControls_usb[realnum] | TA_FIFO_RESET);
-    REST_IRQ_SMP();
-    outpw(TA_MODE2(realnum), __rtControls1_usb[realnum]); // & __rtBRCMask[num]) | __rtDisableMask[num]);
-    mrtcreattab_usb(realnum, 31);
-    for (irt = 0; irt <= 31; ++irt)
-    {
-      outpw(MRTA_SW(realnum), irt << 11);
-      __mrtA2RT[realnum][irt] = 0;
-    }
-    return err;
-#endif
   }
   __tmkTimeOut_usb[realnum] = 0;
   __tmkTimerCtrl_usb[realnum] = 0;
@@ -1865,9 +1708,7 @@ int FARFN rtreset_usb(
   unsigned type;
   unsigned cntr = 0;
   u16 buf_out[16];
-#if NRT > 0
-  int realnum;
-#endif
+  u16 buf_in[4];
   IRQ_FLAGS;
 
   CLRtmkError;
@@ -1881,8 +1722,8 @@ int FARFN rtreset_usb(
     __rtBRCMask_usb[num] = __RT_BRC_MASK_usb[type];
   }
   __tmkMode_usb[num] = RT_MODE; //to device
-  buf_out[0] = 10;
-  buf_out[1] = 1;
+  buf_out[0] = WRITE_PARAM;
+  buf_out[1] = PARAM_MODE;
   buf_out[2] = RT_MODE;
   switch (type)
   {
@@ -1890,24 +1731,24 @@ int FARFN rtreset_usb(
     __hm400Page_usb[num] = 0;
     GET_DIS_IRQ_SMP();
 //    outpw(TA_RESET(num), 0);
-    buf_out[3] = 0;
+    buf_out[3] = WRITE_RG;
     buf_out[4] = TA_RESET(num);
     buf_out[5] = 0;
 //    outpw(TA_TIMCR(num), 0);
-    buf_out[6] = 0;
+    buf_out[6] = WRITE_RG;
     buf_out[7] = TA_TIMCR(num);
     buf_out[8] = 0;
 ////    if (__tmkTimerCtrl[num] & TIMER_BITS)
 ////      outpw(TA_TIMCR(num), __tmkTimerCtrl[num]);
     cntr = (RT_MODE << 7) + TA_RT_DATA_INT_BLK + TA_IRQ_EN + TA_TXRX_EN + TA_BS_MODE_DATA_EN;
 //    outpw(TA_MODE1(num), cntr | TA_FIFO_RESET);
-    buf_out[9] = 0;
+    buf_out[9] = WRITE_RG;
     buf_out[10] = TA_MODE1(num);
     buf_out[11] = cntr | TA_FIFO_RESET;
     REST_IRQ_SMP();
     __rtControls1_usb[num] &= 0xF800 | TA_HBIT_MODE | TA_BRCST_MODE;
 //    outpw(TA_MODE2(num), (__rtControls1[num])); // & __rtBRCMask[num]) | __rtDisableMask[num]);
-    buf_out[12] = 0;
+    buf_out[12] = WRITE_RG;
     buf_out[13] = TA_MODE2(num);
     buf_out[14] = __rtControls1_usb[num];
     buf_out[15] = 0xFFFF;
@@ -1926,59 +1767,19 @@ int FARFN rtreset_usb(
     }
     GET_DIS_IRQ_SMP();
 //    outpw(TA_MODE1(num), cntr);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_MODE1(num);
     buf_out[2] = cntr;
-    buf_out[3] = 0xFFFF;
-    Block_out_in(minor_table[num], buf_out, NULL);
+    buf_out[3] = READ_RG;
+    buf_out[4] = TA_BASE(num);
+    buf_out[5] = 0xFFFF;
+    Block_out_in(minor_table[num], buf_out, buf_in);
 
     REST_IRQ_SMP();
     __tmkTimeOut_usb[num] = 0;
     __tmkTimerCtrl_usb[num] = 0;
+    __rtGap_usb[num] = 0;
     break;
-#ifdef MRTA
-  case __MRTA:
-    realnum = GET_RealNum;
-    __tmkMode_usb[realnum] = MRT_MODE;//!!send
-    __tmkTimeOut_usb[realnum] = 0;
-    __tmkTimerCtrl_usb[realnum] = 0;
-    cntr = 0;
-    if (num == realnum)
-      break;
-
-    cntr = TA_RT_DATA_INT_BLK + TA_TXRX_EN + TA_BS_MODE_DATA_EN + TA_IRQ_EN;
-    if (__dmrtRT[realnum] == 0L)
-    {
-      GET_DIS_IRQ_SMP();
-      outpw(TA_RESET(realnum), 0);
-      __mrtLastBrcTxRT[realnum] = 0;
-      outpw(TA_TIMCR(realnum), 0);
-//    if (__tmkTimerCtrl[num] & TIMER_BITS)
-//      outpw(TA_TIMCR(realnum), __tmkTimerCtrl[num]);
-      outpw(TA_MODE1(realnum), cntr | TA_FIFO_RESET);
-      REST_IRQ_SMP();
-      mrtcreattab_usb(realnum, 31);
-    }
-    if (__dmrtRT[realnum] != 0L)
-      cntr |= TA_RTMT_START;
-    GET_DIS_IRQ_SMP();
-    outpw(TA_MODE1(realnum), cntr);
-    REST_IRQ_SMP();
-    __rtControls1_usb[realnum] &= TA_HBIT_MODE | TA_BRCST_MODE;
-    outpw(TA_MODE2(realnum), (__rtControls1_usb[realnum])); // & __rtBRCMask[num]) | __rtDisableMask[num]);
-    outpw(MRTA_SW(realnum), 0xF800 | __rtControls1_usb[realnum] | DrvMrtaBrcRtOn(realnum));
-    __rtControls1_usb[num] &= 0xF800 | TA_HBIT_MODE | TA_BRCST_MODE | MRTA_RT_ON;
-    if (__rtControls1_usb[num] & MRTA_RT_ON) //!__rtDisableMask[num]
-    {
-      __rtControls1_usb[num] &= ~MRTA_RT_ON;
-      outpw(MRTA_SW(realnum), __rtControls1_usb[num]);
-      DrvFlagMode_usb(num, 0);
-      DrvRtWMode_usb(num, __MRTA, 0);
-      __rtControls1_usb[num] |= MRTA_RT_ON;
-      outpw(MRTA_SW(realnum), __rtControls1_usb[num]);
-    }
-    break;
-#endif
   }
   __rtControls_usb[num] = cntr;
   __rtMode_usb[num] = 0;
@@ -1996,13 +1797,14 @@ int FARFN mtreset_usb(
   int realnum;
   unsigned type;
   unsigned cntr = 0;
-  u16 buf_out[19];
+  u16 buf_out[21];
+  u16 buf_in[4];
 
   CLRtmkError;
   realnum = GET_RealNum;
   __tmkMode_usb[realnum] = MT_MODE; //to device
-  buf_out[0] = 10;
-  buf_out[1] = 1;
+  buf_out[0] = WRITE_PARAM;
+  buf_out[1] = PARAM_MODE;
   buf_out[2] = MT_MODE;
   __tmkStarted_usb[realnum] = 0;
   type = __tmkDrvType_usb[realnum];
@@ -2010,40 +1812,37 @@ int FARFN mtreset_usb(
   CHECK_TMK_DEVICE(realnum);
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    __tmkMode_usb[realnum] = 0xFFFF;//!!!send
-    return USER_ERROR(TMK_BAD_FUNC);
-#endif
   case __TA:
     GET_DIS_IRQ_SMP();
 //    outpw(TA_RESET(realnum), 0);
-    buf_out[3] = 0;
+    buf_out[3] = WRITE_RG;
     buf_out[4] = TA_RESET(realnum);
     buf_out[5] = 0;
 //    outpw(TA_TIMCR(realnum), 0);
-    buf_out[6] = 0;
+    buf_out[6] = WRITE_RG;
     buf_out[7] = TA_TIMCR(realnum);
     buf_out[8] = 0;
 ////    if (__tmkTimerCtrl[realnum] & TIMER_BITS)
 ////      outpw(TA_TIMCR(realnum), __tmkTimerCtrl[realnum]);
     cntr = (MT_MODE << 7) | (TA_TXRX_EN + TA_IRQ_EN);
 //    outpw(TA_MODE1(realnum), cntr | TA_FIFO_RESET);
-    buf_out[9] = 0;
+    buf_out[9] = WRITE_RG;
     buf_out[10] = TA_MODE1(realnum);
     buf_out[11] = cntr | TA_FIFO_RESET;
 //    outpw(TA_MODE1(realnum), cntr);
-    buf_out[12] = 0;
+    buf_out[12] = WRITE_RG;
     buf_out[13] = TA_MODE1(realnum);
     buf_out[14] = cntr;
     REST_IRQ_SMP();
     __bcControls1_usb[realnum] = 0xF800; // disable RT
 //    outpw(TA_MODE2(realnum), __bcControls1[realnum]);
-    buf_out[15] = 0;
+    buf_out[15] = WRITE_RG;
     buf_out[16] = TA_MODE2(realnum);
     buf_out[17] = __bcControls1_usb[realnum];
-    buf_out[18] = 0xFFFF;
-    Block_out_in(minor_table[realnum], buf_out, NULL);
+    buf_out[18] = READ_RG;
+    buf_out[19] = TA_BASE(realnum);
+    buf_out[20] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     break;
   }
   __tmkTimeOut_usb[realnum] = 0;
@@ -2062,7 +1861,8 @@ int FARFN mtdefmode_usb(
   unsigned type;
 //  unsigned port;
   unsigned bits, bitst;
-  u16 buf_out[4];
+  u16 buf_out[6];
+  u16 buf_in[4];
 
   CLRtmkError;
   realnum = GET_RealNum;
@@ -2073,10 +1873,6 @@ int FARFN mtdefmode_usb(
   bits = 0;
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    return USER_ERROR(BC_BAD_FUNC);
-#endif
   case __TA:
     if (bitst & DRV_HBIT_MODE)
       bits |= TA_HBIT_MODE;
@@ -2089,11 +1885,13 @@ int FARFN mtdefmode_usb(
 ////    bits &= __rtBRCMask[num];
 ////    bits |= __rtDisableMask[num];
 //    outpw(TA_MODE2(realnum), bits);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_MODE2(realnum);
     buf_out[2] = bits;
-    buf_out[3] = 0xFFFF;
-    Block_out_in(minor_table[realnum], buf_out, NULL);
+    buf_out[3] = READ_RG;
+    buf_out[4] = TA_BASE(realnum);
+    buf_out[5] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     break;
   }
   return 0;
@@ -2115,12 +1913,6 @@ U16 FARFN mtgetmode_usb(
   CHECK_TMK_TYPE(type);
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    USER_ERROR(BC_BAD_FUNC);
-    bits = 0;
-    break;
-#endif
   case __TA:
     bitst = __bcControls1_usb[realnum]; //inpw(TA_MODE2(num));
     bits = 0;
@@ -2142,7 +1934,8 @@ int FARFN bcdefirqmode_usb(
   int realnum;
   unsigned type;
   unsigned bits;
-  u16 buf_out[4];
+  u16 buf_out[6];
+  u16 buf_in[4];
 
   CLRtmkError;
   realnum = GET_RealNum;
@@ -2151,10 +1944,6 @@ int FARFN bcdefirqmode_usb(
   CHECK_TMK_DEVICE(realnum);
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    return USER_ERROR(BC_BAD_FUNC);
-#endif
   case __TA:
     bits = (((bcIrqModeBits & TMK_IRQ_OFF) ^ TMK_IRQ_OFF) >> 5);
     GET_MUTEX;
@@ -2162,11 +1951,13 @@ int FARFN bcdefirqmode_usb(
     __bcControls_usb[realnum] = bits;
     GET_DIS_IRQ_SMP();
 //    outpw(TA_MODE1(realnum), bits);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_MODE1(realnum);
     buf_out[2] = bits;
-    buf_out[3] = 0xFFFF;
-    Block_out_in(minor_table[realnum], buf_out, NULL);
+    buf_out[3] = READ_RG;
+    buf_out[4] = TA_BASE(realnum);
+    buf_out[5] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     REST_IRQ_SMP();
     REST_MUTEX;
     break;
@@ -2193,15 +1984,9 @@ U16 FARFN bcgetirqmode_usb(
   CHECK_TMK_DEVICEN(realnum);
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    USER_ERROR(BC_BAD_FUNC);
-    bits = 0;
-    break;
-#endif
   case __TA:
     bits = GENER1_BLK | GENER2_BLK;
-    buf_out[0] = 1;
+    buf_out[0] = READ_RG;
     buf_out[1] = TA_MODE1(realnum);
     buf_out[2] = 0xFFFF;
     Block_out_in(minor_table[realnum], buf_out, buf_in);
@@ -2296,25 +2081,21 @@ int FARFN bcstart_usb(
     break;
   }
 
-  buf_out[0] = 10;
-  buf_out[1] = 2;
+  buf_out[0] = WRITE_PARAM;
+  buf_out[1] = PARAM_BCBASEBUS;
   buf_out[2] = base;
-  buf_out[3] = 10;
-  buf_out[4] = 4;
+  buf_out[3] = WRITE_PARAM;
+  buf_out[4] = PARAM_BCXSTART;
   buf_out[5] = 0;
-  buf_out[6] = 10;
-  buf_out[7] = 8;
+  buf_out[6] = WRITE_PARAM;
+  buf_out[7] = PARAM_BCAW1POS;
   buf_out[8] = __bcAW1Pos_usb[realnum];
-  buf_out[9] = 10;
-  buf_out[10] = 9;
+  buf_out[9] = WRITE_PARAM;
+  buf_out[10] = PARAM_BCAW2POS;
   buf_out[11] = __bcAW2Pos_usb[realnum];
 
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    return USER_ERROR(BC_BAD_FUNC);
-#endif
   case __TA:
     {
       unsigned ContrW;
@@ -2328,19 +2109,19 @@ int FARFN bcstart_usb(
 //      outpw(TA_ADDR(realnum), (base<<6) | 61);
 //      outpw(TA_DATA(realnum), ContrW);
 //      outpw(TA_DATA(realnum), 0);
-      buf_out[12] = 2;
+      buf_out[12] = WRITE_MEM;
       buf_out[13] = 2;
       buf_out[14] = (base<<6) | 61;
       buf_out[15] = ContrW;
       buf_out[16] = 0;
       REST_IRQ_SMP();
 //      outpw(TA_MSGA(realnum), base & 0x03FF);
-      buf_out[17] = 0;
+      buf_out[17] = WRITE_RG;
       buf_out[18] = TA_MSGA(realnum);
       buf_out[19] = base & 0x03FF;
 
 //      outpw(TA_MODE2(realnum), __bcControls1[realnum] | TA_BC_START);
-      buf_out[20] = 0;
+      buf_out[20] = WRITE_RG;
       buf_out[21] = TA_MODE2(realnum);
       buf_out[22] = __bcControls1_usb[realnum] | TA_BC_START;
       buf_out[23] = 0xFFFF;
@@ -2359,7 +2140,8 @@ int FARFN bcstop_usb(
 {
   int realnum;
   unsigned type;
-  u16 buf_out[5];
+  u16 buf_out[6];
+  u16 buf_in[5];
 
   CLRtmkError;
   realnum = GET_RealNum;
@@ -2369,10 +2151,6 @@ int FARFN bcstop_usb(
   CHECK_TMK_DEVICE(realnum);
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    return USER_ERROR(BC_BAD_FUNC);
-#endif
   case __TA:
     if (__tmkMode_usb[realnum] != MT_MODE) //bcstop
     {
@@ -2382,11 +2160,13 @@ int FARFN bcstop_usb(
       buf_out[2] = 0xFFFF;
       buf_out[3] = 0;
       buf_out[4] = 0xFFFF;*/
-      buf_out[0] = 0;
+      buf_out[0] = WRITE_RG;
       buf_out[1] = TA_MODE2(realnum);
       buf_out[2] = __bcControls1_usb[realnum] | TA_BC_STOP;
-      buf_out[3] = 0xFFFF;
-      Block_out_in(minor_table[realnum], buf_out, NULL);
+      buf_out[3] = READ_RG;
+      buf_out[4] = TA_BASE(realnum);
+      buf_out[5] = 0xFFFF;
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
     }
     else //mtstop
     {
@@ -2394,11 +2174,13 @@ int FARFN bcstop_usb(
       GET_DIS_IRQ_SMP();
 //      outpw(TA_MODE1(realnum), __bcControls[realnum] &= ~TA_RTMT_START);
       __bcControls_usb[realnum] &= ~TA_RTMT_START;
-      buf_out[0] = 0;
+      buf_out[0] = WRITE_RG;
       buf_out[1] = TA_MODE1(realnum);
       buf_out[2] = __bcControls_usb[realnum];
-      buf_out[3] = 0xFFFF;
-      Block_out_in(minor_table[realnum], buf_out, NULL);
+      buf_out[3] = READ_RG;
+      buf_out[4] = TA_BASE(realnum);
+      buf_out[5] = 0xFFFF;
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
 ////      outpw(TA_MODE1(realnum), inpw(TA_MODE1(realnum)) & 0xFFF7);
       REST_IRQ_SMP();
       REST_MUTEX;
@@ -2434,18 +2216,14 @@ int FARFN bcstartx_usb(
   CHECK_TMK_DEVICE(realnum);
   __bcBaseBus_usb[realnum] = base; //to device
   __bcXStart_usb[realnum] = 1; //to device
-  buf_out[0] = 10;
-  buf_out[1] = 2;
+  buf_out[0] = WRITE_PARAM;
+  buf_out[1] = PARAM_BCBASEBUS;
   buf_out[2] = base;
-  buf_out[3] = 10;
-  buf_out[4] = 4;
+  buf_out[3] = WRITE_PARAM;
+  buf_out[4] = PARAM_BCXSTART;
   buf_out[5] = 1;
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    return USER_ERROR(BC_BAD_FUNC);
-#endif
   case __TA:
     if (__tmkMode_usb[realnum] != MT_MODE) //bcstartx
     {
@@ -2469,11 +2247,7 @@ int FARFN bcstartx_usb(
         ContrW |= 0x0080;
       if (code & CX_CONT)
         ContrW |= 0x2000;
-#if DRV_MAX_BASE < 256
-      code1 = __bcLinkWN[realnum][base];
-#else
       code1 = __bcLinkCCN_usb[realnum][base];
-#endif
       if (code1 & CX_SIG)
         ContrW |= 0x8000;
 
@@ -2481,7 +2255,7 @@ int FARFN bcstartx_usb(
 //      outpw(TA_ADDR(realnum), (base<<6) | 61);
 //      outpw(TA_DATA(realnum), ContrW);
 //      outpw(TA_DATA(realnum), 0);
-      buf_out[6] = 2;
+      buf_out[6] = WRITE_MEM;
       buf_out[7] = 2;
       buf_out[8] = (base<<6) | 61;
       buf_out[9] = ContrW;
@@ -2499,7 +2273,7 @@ int FARFN bcstartx_usb(
 //        outpw(port, 0xA020);
 //        outpw(port, 0);
 //        outpw(port, base);
-        buf_out[ptr] = 2;
+        buf_out[ptr] = WRITE_MEM;
         buf_out[ptr + 1] = 3;
         buf_out[ptr + 2] = (0x03FF<<6) | 61;
         buf_out[ptr + 3] = 0xA020;
@@ -2511,12 +2285,12 @@ int FARFN bcstartx_usb(
       }
 #endif //def DRV_EMULATE_FIRST_CX_SIG
 //      outpw(TA_MSGA(realnum), base & 0x03FF);
-      buf_out[ptr] = 0;
+      buf_out[ptr] = WRITE_RG;
       buf_out[ptr + 1] = TA_MSGA(realnum);
       buf_out[ptr + 2] = base & 0x03FF;
 
 //      outpw(TA_MODE2(realnum), __bcControls1[realnum] | TA_BC_START);
-      buf_out[ptr + 3] = 0;
+      buf_out[ptr + 3] = WRITE_RG;
       buf_out[ptr + 4] = TA_MODE2(realnum);
       buf_out[ptr + 5] = __bcControls1_usb[realnum] | TA_BC_START;
       buf_out[ptr + 6] = 0xFFFF;
@@ -2540,18 +2314,18 @@ int FARFN bcstartx_usb(
       }*/
 //      __tmkStarted[realnum] = 1;
       __mtCW_usb[realnum] = code; //to device
-      buf_out[6] = 10;
-      buf_out[7] = 5;
+      buf_out[6] = WRITE_PARAM;
+      buf_out[7] = PARAM_MTCW;
       buf_out[8] = code;
       DrvBcDefBaseTA(realnum, AdrTab);
       GET_DIS_IRQ_SMP();
 ////      DrvBcPokeTA(realnum, 0, base|0x4000);
 //      outpw(TA_ADDR(realnum), (__bcBasePC[realnum] << 6) + 0);
-      buf_out[9] = 0;
+      buf_out[9] = WRITE_RG;
       buf_out[10] = TA_ADDR(realnum);
       buf_out[11] = __bcBasePC_usb[realnum] << 6;
 //      outpw(TA_DATA(realnum), base|0x4000);
-      buf_out[12] = 0;
+      buf_out[12] = WRITE_RG;
       buf_out[13] = TA_DATA(realnum);
       buf_out[14] = base|0x4000;
       REST_IRQ_SMP();
@@ -2562,13 +2336,13 @@ int FARFN bcstartx_usb(
 ////      REST_IRQ_SMP();
       DrvBcDefBaseTA(realnum, oldbase);
 //      outpw(TA_MSGA(realnum), AdrTab);
-      buf_out[15] = 0;
+      buf_out[15] = WRITE_RG;
       buf_out[16] = TA_MSGA(realnum);
       buf_out[17] = AdrTab;
       GET_MUTEX;
       GET_DIS_IRQ_SMP();
 //      outpw(TA_MODE1(realnum), __bcControls[realnum] |= TA_RTMT_START);
-      buf_out[18] = 0;
+      buf_out[18] = WRITE_RG;
       buf_out[19] = TA_MODE1(realnum);
       buf_out[20] = __bcControls_usb[realnum] |= TA_RTMT_START;
       buf_out[21] = 0xFFFF;
@@ -2591,12 +2365,10 @@ int FARFN bcdeflink_usb(
   unsigned type;
   unsigned code;
   unsigned base;
-#if DRV_MAX_BASE < 256
-  unsigned link;
-#endif
   unsigned oldbase;
   unsigned code1;
-  u16 buf_out[25];
+  u16 buf_out[27];
+  u16 buf_in[4];
   int ptr = 10;
 
   CLRtmkError;
@@ -2607,34 +2379,24 @@ int FARFN bcdeflink_usb(
   base = Base;
   CHECK_BCMT_BASE_BX(realnum, base);
   CHECK_TMK_DEVICE(realnum);
-#if DRV_MAX_BASE < 256
-  link = (base << 6) | code;
-  code1 = __bcLinkWN[realnum][__bcBasePC_usb[realnum]];
-  __bcLinkWN[realnum][__bcBasePC_usb[realnum]] = link;//!!!send
-#else
   __bcLinkBaseN_usb[realnum][__bcBasePC_usb[realnum]] = base; //to device
-  buf_out[0] = 10;
-  buf_out[1] = 10;
+  buf_out[0] = WRITE_PARAM;
+  buf_out[1] = PARAM_BCLINKBASEN;
   buf_out[2] = 1;
   buf_out[3] = __bcBasePC_usb[realnum];
   buf_out[4] = base;
   code1 = __bcLinkCCN_usb[realnum][__bcBasePC_usb[realnum]];
   __bcLinkCCN_usb[realnum][__bcBasePC_usb[realnum]] = code; //to device
-  buf_out[5] = 10;
-  buf_out[6] = 11;
+  buf_out[5] = WRITE_PARAM;
+  buf_out[6] = PARAM_BCLINKCCN;
   buf_out[7] = 1;
   buf_out[8] = __bcBasePC_usb[realnum];
   buf_out[9] = code;
-#endif
   type = __tmkDrvType_usb[realnum];
   CHECK_TMK_TYPE(type);
   CHECK_TMK_DEVICE(realnum);
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    return USER_ERROR(BC_BAD_FUNC);
-#endif
   case __TA:
     oldbase = __bcBasePC_usb[realnum];
     if (__tmkMode_usb[realnum] != MT_MODE) //bcdeflink
@@ -2659,7 +2421,7 @@ int FARFN bcdeflink_usb(
 //          data = inpw(TA_DATA(realnum));
 //          outpw(TA_ADDR(realnum), (__bcBasePC[realnum] << 6) + 61);
 //          outpw(TA_DATA(realnum), data | 0x8000);
-            buf_out[ptr] = 6;
+            buf_out[ptr] = MOD_MEM_AND;
             buf_out[ptr + 1] = 1;
             buf_out[ptr + 2] = (__bcBasePC_usb[realnum] << 6) + 61;
             buf_out[ptr + 3] = 0xFFFF;
@@ -2672,7 +2434,7 @@ int FARFN bcdeflink_usb(
 //          data = inpw(TA_DATA(realnum));
 //          outpw(TA_ADDR(realnum), (__bcBasePC[realnum] << 6) + 61);
 //          outpw(TA_DATA(realnum), data & ~0x8000);
-            buf_out[ptr] = 6;
+            buf_out[ptr] = MOD_MEM_AND;
             buf_out[ptr + 1] = 1;
             buf_out[ptr + 2] = (__bcBasePC_usb[realnum] << 6) + 61;
             buf_out[ptr + 3] = (u16)(~0x8000);
@@ -2683,32 +2445,30 @@ int FARFN bcdeflink_usb(
 ////      DrvBcPokeTA(realnum, 63, base);
 //      outpw(TA_ADDR(realnum), (__bcBasePC[realnum] << 6) + 63);
 //      outpw(TA_DATA(realnum), base);
-      buf_out[ptr] = 2;
+      buf_out[ptr] = WRITE_MEM;
       buf_out[ptr + 1] = 1;
       buf_out[ptr + 2] = (__bcBasePC_usb[realnum] << 6) + 63;
       buf_out[ptr + 3] = base;
 
       DrvBcDefBaseTA(realnum, base);
-#if DRV_MAX_BASE < 256
-      code1 = __bcLinkWN[realnum][base];
-#else
       code1 = __bcLinkCCN_usb[realnum][base];
-#endif
       if (code1 & CX_SIG)
         ContrW |= 0x8000;
 //      outpw(TA_ADDR(realnum), (base<<6) | 61);
 //      outpw(TA_DATA(realnum), ContrW);
 //      outpw(TA_DATA(realnum), 0);
-      buf_out[ptr + 4] = 2;
+      buf_out[ptr + 4] = WRITE_MEM;
       buf_out[ptr + 5] = 2;
       buf_out[ptr + 6] = (base<<6) | 61;
       buf_out[ptr + 7] = ContrW;
       buf_out[ptr + 8] = 0;
-      buf_out[ptr + 9] = 0xFFFF;
+      buf_out[ptr + 9] = READ_RG;
+      buf_out[ptr + 10] = TA_BASE(realnum);
+      buf_out[ptr + 11] = 0xFFFF;
 
       REST_IRQ_SMP();
       DrvBcDefBaseTA(realnum, oldbase);
-      Block_out_in(minor_table[realnum], buf_out, NULL);
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
     }
     else //mtdeflink
     { //!!!todo: 0x4000 only if CX_STOP | CX_INT
@@ -2716,12 +2476,14 @@ int FARFN bcdeflink_usb(
 ////      DrvBcPokeTA(realnum, 63, base|0x4000);
 //      outpw(TA_ADDR(realnum), (__bcBasePC[realnum] << 6) + 63);
 //      outpw(TA_DATA(realnum), base|0x4000);
-      buf_out[10] = 2;
+      buf_out[10] = WRITE_MEM;
       buf_out[11] = 1;
       buf_out[12] = (__bcBasePC_usb[realnum] << 6) + 63;
       buf_out[13] = base|0x4000;
-      buf_out[14] = 0xFFFF;
-      Block_out_in(minor_table[realnum], buf_out, NULL);
+      buf_out[14] = READ_RG;
+      buf_out[15] = TA_BASE(realnum);
+      buf_out[16] = 0xFFFF;
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
       REST_IRQ_SMP();
     }
     break;
@@ -2736,25 +2498,15 @@ U32 FARFN bcgetlink_usb(
         )
 {
   int realnum;
-#if DRV_MAX_BASE < 256
-  unsigned link;
-#endif
   unsigned base;
 
 
   CLRtmkError;
   realnum = GET_RealNum;
   CHECK_TMK_MODE_L(realnum, BCMT_MODE_L);
-#if DRV_MAX_BASE < 256
-  link = __bcLinkWN[realnum][__bcBasePC_usb[realnum]];
-  base = (link >> 6) & __bcMaxBase_usb[realnum];
-  link &= 0x803F;
-  return ((U32)link << 16) | (U32)base;
-#else
   base = __bcBasePC_usb[realnum];
   return ((U32)__bcLinkCCN_usb[realnum][base] << 16) |
           (U32)__bcLinkBaseN_usb[realnum][base];
-#endif
 }
 
 U32 FARFN bcgetstate_usb(
@@ -2778,13 +2530,9 @@ U32 FARFN bcgetstate_usb(
   CHECK_TMK_DEVICEN(realnum);
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    return USER_ERROR(BC_BAD_FUNC);
-#endif
   case __TA:
 //!!! mtgetstate?
-    buf_out[0] = 1;
+    buf_out[0] = READ_RG;
     buf_out[1] = TA_BASE(realnum);
     buf_out[2] = 0xFFFF;
     Block_out_in(minor_table[realnum], buf_out, buf_in);
@@ -2803,20 +2551,13 @@ U16 FARFN bcgetmaxbase_usb(
         )
 {
   int realnum;
-#ifdef TMK1553BUSB_DEBUG
-  printk(KERN_INFO "Tmk1553b: bcgetmaxbase core\n");
-#endif
 
   CLRtmkError;
   realnum = GET_RealNum;
-#if DRV_MAX_BASE > 255
   if (__tmkMode_usb[realnum] == BC_MODE)
     return __bcMaxBase_usb[realnum];
   else
     return __mtMaxBase_usb[realnum];
-#else
-  return __bcMaxBase_usb[realnum];
-#endif
 }
 
 U16 FARFN bcgetbase_usb(
@@ -2840,9 +2581,6 @@ void DrvBcDefBase_usb(int realnum, unsigned type, unsigned base)
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     return;
   }
   return;
@@ -2873,7 +2611,8 @@ void DrvBcPoke_usb(int realnum, unsigned type, unsigned pos, unsigned data)
 {
   unsigned port;
   unsigned save_rama, save_ramiw;
-  u16 buf_out[10];
+  u16 buf_out[12];
+  u16 buf_in[4];
   IRQ_FLAGS;
 
   save_rama = __tmkRAMAddr_usb[realnum];
@@ -2882,38 +2621,39 @@ void DrvBcPoke_usb(int realnum, unsigned type, unsigned pos, unsigned data)
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     pos |= __bcBasePC_usb[realnum] << 6;
     port = __tmkPortsAddr1_usb[realnum] + TMK_AddrPort;
     __tmkRAMAddr_usb[realnum] = pos;
     GET_DIS_IRQ_SMP();
 //    outpw(port, pos);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = port;
     buf_out[2] = pos;
     port += TMK_DataPort-TMK_AddrPort;
 //    outpw(port, data);
-    buf_out[3] = 0;
+    buf_out[3] = WRITE_RG;
     buf_out[4] = port;
     buf_out[5] = data;
-    REST_IRQ_SMP();
     if (!save_ramiw)
     {
-      buf_out[6] = 0xFFFF;
-      Block_out_in(minor_table[realnum], buf_out, NULL);
+      buf_out[6] = READ_RG;
+      buf_out[7] = TA_BASE(realnum);
+      buf_out[8] = 0xFFFF;
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
+      REST_IRQ_SMP();
       __tmkRAMInWork_usb[realnum] = 0;
       return;
     }
     port += TMK_AddrPort-TMK_DataPort;
     __tmkRAMAddr_usb[realnum] = save_rama;
-    GET_DIS_IRQ_SMP();
 //    outpw(port, save_rama);
-    buf_out[6] = 0;
+    buf_out[6] = WRITE_RG;
     buf_out[7] = port;
     buf_out[8] = save_rama;
-    buf_out[9] = 0xFFFF;
+    buf_out[9] = READ_RG;
+    buf_out[10] = TA_BASE(realnum);
+    buf_out[11] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     REST_IRQ_SMP();
     return;
   }
@@ -2933,20 +2673,17 @@ unsigned DrvBcPeek_usb(int realnum, unsigned type, unsigned pos)
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     pos |= __bcBasePC_usb[realnum] << 6;
     port = __tmkPortsAddr1_usb[realnum] + TMK_AddrPort;
     __tmkRAMAddr_usb[realnum] = pos;
     GET_DIS_IRQ_SMP();
 //    outpw(port, pos);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = port;
     buf_out[2] = pos;
     port += TMK_DataPort-TMK_AddrPort;
 //    data = inpw(port);
-    buf_out[3] = 1;
+    buf_out[3] = READ_RG;
     buf_out[4] = port;
     REST_IRQ_SMP();
     if (!save_ramiw)
@@ -2959,7 +2696,7 @@ unsigned DrvBcPeek_usb(int realnum, unsigned type, unsigned pos)
     __tmkRAMAddr_usb[realnum] = save_rama;
     GET_DIS_IRQ_SMP();
 //    outpw(port, save_rama);
-    buf_out[5] = 0;
+    buf_out[5] = WRITE_RG;
     buf_out[6] = port;
     buf_out[7] = save_rama;
     buf_out[8] = 0xFFFF;
@@ -3022,7 +2759,6 @@ U32 FARFN bcgetansw_usb(
   return ((U32)aw2 << 16) | (U32)aw1;
 }
 
-
 U16 FARFN mtgetsw_usb(
 #ifndef STATIC_TMKNUM
         int __tmkNumber_usb
@@ -3046,11 +2782,11 @@ U16 FARFN mtgetsw_usb(
   case __TA:
     GET_DIS_IRQ_SMP();
 //    outpw(TA_ADDR(realnum), (__bcBasePC[realnum] << 6) + 58);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_ADDR(realnum);
     buf_out[2] = (__bcBasePC_usb[realnum] << 6) + 58;
 //    data = inpw(TA_DATA(realnum));
-    buf_out[3] = 1;
+    buf_out[3] = READ_RG;
     buf_out[4] = TA_DATA(realnum);
     buf_out[5] = 0xFFFF;
     Block_out_in(minor_table[realnum], buf_out, buf_in);
@@ -3135,6 +2871,7 @@ void FARFN bcputblk_usb(
   U16 FARDT *buf;
   unsigned save_rama, save_ramiw;
   u16 * buf_out;
+  u16 buf_in[4];
   IRQ_FLAGS;
 
   CLRtmkError;
@@ -3152,7 +2889,7 @@ void FARFN bcputblk_usb(
   {
     __bcCmdWN_usb[realnum][__bcBasePC_usb[realnum]] = *(U16 FARDT*)buf;
   }
-  maxlen = (minor_table[realnum]->ep2_maxsize - 6) / 2;
+  maxlen = (minor_table[realnum]->ep2_maxsize) / 2 - 6;
   type = __tmkDrvType_usb[realnum];
   CHECK_TMK_TYPE(type);
   save_rama = __tmkRAMAddr_usb[realnum];
@@ -3161,10 +2898,7 @@ void FARFN bcputblk_usb(
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
-    buf_out = kmalloc(sizeof(u16) * ((len>maxlen?maxlen:len) + 7), GFP_KERNEL);
+    buf_out = kmalloc(sizeof(u16) * ((len>maxlen?maxlen:len) + 12), GFP_KERNEL);
     if(buf_out == NULL)
       return;
     pos |= __bcBasePC_usb[realnum] << 6;
@@ -3179,7 +2913,7 @@ void FARFN bcputblk_usb(
     do
     {
       rep = len>maxlen?maxlen:len;
-      buf_out[ptr] = 2;
+      buf_out[ptr] = WRITE_MEM;
       buf_out[ptr + 1] = rep;
       buf_out[ptr + 2] = pos;
       pos += rep;
@@ -3206,8 +2940,10 @@ void FARFN bcputblk_usb(
 
     if (!save_ramiw)
     {
-      buf_out[ptr] = 0xFFFF;
-      Block_out_in(minor_table[realnum], buf_out, NULL);
+      buf_out[ptr] = READ_RG;
+      buf_out[ptr + 1] = TA_BASE(realnum);
+      buf_out[ptr + 2] = 0xFFFF;
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
       kfree(buf_out);
       break;
     }
@@ -3215,11 +2951,16 @@ void FARFN bcputblk_usb(
     __tmkRAMAddr_usb[realnum] = save_rama;
     GET_DIS_IRQ_SMP();
 //    outpw(port, save_rama);
-    buf_out[ptr] = 0;
-    buf_out[ptr + 1] = TA_ADDR(realnum);
-    buf_out[ptr + 2] = save_rama;
-    buf_out[ptr + 3] = 0xFFFF;
+    buf_out[ptr] = 0xFFFF;
     Block_out_in(minor_table[realnum], buf_out, NULL);
+    
+    buf_out[0] = WRITE_RG;
+    buf_out[1] = TA_ADDR(realnum);
+    buf_out[2] = save_rama;
+    buf_out[3] = READ_RG;
+    buf_out[4] = TA_BASE(realnum);
+    buf_out[5] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     kfree(buf_out);
     REST_IRQ_SMP();
     return;
@@ -3259,17 +3000,14 @@ void FARFN bcgetblk_usb(
   CHECK_TMK_DEVICEV(realnum);
   if (len == 0)
     return;
-  maxlen = (minor_table[realnum]->ep2_maxsize) / 2;
+  maxlen = (minor_table[realnum]->ep2_maxsize) / 2 - 4;
   save_rama = __tmkRAMAddr_usb[realnum];
   save_ramiw = __tmkRAMInWork_usb[realnum];
   __tmkRAMInWork_usb[realnum] = 1;
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
-    buf_in = kmalloc(sizeof(u16) * ((len>maxlen?maxlen:len) + 5), GFP_KERNEL);
+    buf_in = kmalloc(sizeof(u16) * ((len>maxlen?maxlen:len) + 8), GFP_KERNEL);
     pos |= __bcBasePC_usb[realnum] << 6;
 //    port = __tmkPortsAddr1[realnum] + TMK_AddrPort;
     __tmkRAMAddr_usb[realnum] = pos + len;
@@ -3281,7 +3019,7 @@ void FARFN bcgetblk_usb(
     do
     {
       rep = len>maxlen?maxlen:len;
-      buf_out[0] = 3;
+      buf_out[0] = READ_MEM;
       if(rep == 1)
         buf_out[1] = rep + 1;
       else
@@ -3319,7 +3057,7 @@ void FARFN bcgetblk_usb(
     __tmkRAMAddr_usb[realnum] = save_rama;
     GET_DIS_IRQ_SMP();
 //    outpw(port, save_rama);
-    buf_out[3] = 0;
+    buf_out[3] = WRITE_RG;
     buf_out[4] = TA_ADDR(realnum);
     buf_out[5] = save_rama;
     buf_out[6] = 0xFFFF;
@@ -3352,9 +3090,6 @@ int FARFN bcdefbus_usb(
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     CHECK_BC_BUS(bus)
     __bcBus_usb[realnum] = bus;
     break;
@@ -3381,9 +3116,6 @@ void DrvRtDefSubAddr_usb(int num, unsigned type, unsigned sa_shl5)
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     return;
   }
   return;
@@ -3394,41 +3126,6 @@ unsigned DrvRtGetBaseTA_usb(int num)
 {
   return __rtSubAddr_usb[num] >> 5;
 }
-
-#if NRT > 0
-void FARFN mrtdefbrcsubaddr0_usb(
-#ifndef STATIC_TMKNUM
-        int __tmkNumber
-#endif
-        )
-{
-  int realnum;
-  unsigned type;
-  unsigned sa;
-
-  CLRtmkError;
-  realnum = GET_RealNum;
-  type = __tmkDrvType_usb[realnum];
-  CHECK_TMK_TYPE(type);
-  switch (type)
-  {
-#ifdef MRTA
-// check with DrvFlagMode!!!
-//  case __MRTA:
-//    sa = mrtBrcSubAddr0[realnum]; //& 0xFFE0
-//    break;
-#endif
-  default:
-    return;
-  }
-  DrvRtDefSubAddr_usb(realnum, type, sa);
-  if (realnum != __tmkNumber)
-  {
-    DrvRtDefSubAddr_usb(__tmkNumber, type, sa);
-  }
-  return;
-}
-#endif //NRT
 
 void FARFN rtdefsubaddr_usb(
 #ifndef STATIC_TMKNUM
@@ -3503,21 +3200,15 @@ void FARFN rtgetblk_usb(
   pos |= __hm400Page_usb[num];
   realnum = GET_RealNum;
   CHECK_TMK_DEVICEV(realnum);
-  maxlen = (minor_table[realnum]->ep2_maxsize) / 2;
+  maxlen = (minor_table[realnum]->ep2_maxsize) / 2 - 4;
 //  port = __tmkPortsAddr1[realnum];
   save_rama = __tmkRAMAddr_usb[realnum];
   save_ramiw = __tmkRAMInWork_usb[realnum];
   __tmkRAMInWork_usb[realnum] = 1;
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    GET_DIS_IRQ_SMP();
-    outpw(MRTA_ADDR2(realnum), __hm400Page2_usb[num]);
-    REST_IRQ_SMP();
-#endif
   case __TA:
-    buf_in = kmalloc(sizeof(u16) * ((len>maxlen?maxlen:len) + 5), GFP_KERNEL);
+    buf_in = kmalloc(sizeof(u16) * ((len>maxlen?maxlen:len) + 8), GFP_KERNEL);
     pos = ((pos & 0xFFE0) << 1) | (pos & 0x1F);
 //    port += TMK_AddrPort;
     __tmkRAMAddr_usb[realnum] = pos + len;
@@ -3529,7 +3220,7 @@ void FARFN rtgetblk_usb(
     do
     {
       rep = len>maxlen?maxlen:len;
-      buf_out[0] = 3;
+      buf_out[0] = READ_MEM;
       if(rep == 1)
         buf_out[1] = rep + 1;
       else
@@ -3567,7 +3258,7 @@ void FARFN rtgetblk_usb(
     __tmkRAMAddr_usb[realnum] = save_rama;
     GET_DIS_IRQ_SMP();
 //    outpw(port, save_rama);
-    buf_out[3] = 0;
+    buf_out[3] = WRITE_RG;
     buf_out[4] = TA_ADDR(realnum);
     buf_out[5] = save_rama;
     buf_out[6] = 0xFFFF;
@@ -3597,6 +3288,7 @@ void FARFN rtputblk_usb(
   int ptr;
   U16 FARDT *buf;
   u16 * buf_out;
+  u16 buf_in[4];
   unsigned save_rama, save_ramiw;
   IRQ_FLAGS;
 
@@ -3615,21 +3307,15 @@ void FARFN rtputblk_usb(
   pos |= __hm400Page_usb[num];
   realnum = GET_RealNum;
   CHECK_TMK_DEVICEV(realnum);
-  maxlen = (minor_table[realnum]->ep2_maxsize - 6) / 2;
+  maxlen = (minor_table[realnum]->ep2_maxsize) / 2 - 6;
 //  port = __tmkPortsAddr1[realnum];
   save_rama = __tmkRAMAddr_usb[realnum];
   save_ramiw = __tmkRAMInWork_usb[realnum];
   __tmkRAMInWork_usb[realnum] = 1;
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    GET_DIS_IRQ_SMP();
-    outpw(MRTA_ADDR2(realnum), __hm400Page2_usb[num]);
-    REST_IRQ_SMP();
-#endif
   case __TA:
-    buf_out = kmalloc(sizeof(u16) * ((len>maxlen?maxlen:len) + 7), GFP_KERNEL);
+    buf_out = kmalloc(sizeof(u16) * ((len>maxlen?maxlen:len) + 12), GFP_KERNEL);
     pos = ((pos & 0xFFE0) << 1) | (pos & 0x1F);
 //    port += TMK_AddrPort;
     __tmkRAMAddr_usb[realnum] = pos + len;
@@ -3642,7 +3328,7 @@ void FARFN rtputblk_usb(
     do
     {
       rep = len>maxlen?maxlen:len;
-      buf_out[ptr] = 2;
+      buf_out[ptr] = WRITE_MEM;
       buf_out[ptr + 1] = rep;
       buf_out[ptr + 2] = pos;
       pos += rep;
@@ -3670,8 +3356,10 @@ void FARFN rtputblk_usb(
 
     if (!save_ramiw)
     {
-      buf_out[ptr] = 0xFFFF;
-      Block_out_in(minor_table[realnum], buf_out, NULL);
+      buf_out[ptr] = READ_RG;
+      buf_out[ptr + 1] = TA_BASE(realnum);
+      buf_out[ptr + 2] = 0xFFFF;
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
       kfree(buf_out);
       break;
     }
@@ -3679,11 +3367,16 @@ void FARFN rtputblk_usb(
     __tmkRAMAddr_usb[realnum] = save_rama;
     GET_DIS_IRQ_SMP();
 //    outpw(port, save_rama);
-    buf_out[ptr] = 0;
-    buf_out[ptr + 1] = TA_ADDR(realnum);
-    buf_out[ptr + 2] = save_rama;
-    buf_out[ptr + 3] = 0xFFFF;
+    buf_out[ptr] = 0xFFFF;
     Block_out_in(minor_table[realnum], buf_out, NULL);
+
+    buf_out[0] = READ_RG;
+    buf_out[1] = TA_ADDR(realnum);
+    buf_out[2] = save_rama;
+    buf_out[3] = READ_RG;
+    buf_out[4] = TA_BASE(realnum);
+    buf_out[5] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     REST_IRQ_SMP();
     kfree(buf_out);
     return;
@@ -3724,24 +3417,18 @@ U16 FARFN rtgetw_usb(
   __tmkRAMInWork_usb[realnum] = 1;
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    GET_DIS_IRQ_SMP();
-    outpw(MRTA_ADDR2(realnum), __hm400Page2_usb[num]);
-    REST_IRQ_SMP();
-#endif
   case __TA:
     pos = ((pos & 0xFFE0) << 1) | (pos & 0x1F);
     port += TMK_AddrPort;
     __tmkRAMAddr_usb[realnum] = pos;
     GET_DIS_IRQ_SMP();
 //    outpw(port, pos);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = port;
     buf_out[2] = pos;
     port += TMK_DataPort-TMK_AddrPort;
 //    data = inpw(port);
-    buf_out[3] = 1;
+    buf_out[3] = READ_RG;
     buf_out[4] = port;
     REST_IRQ_SMP();
     if (!save_ramiw)
@@ -3755,7 +3442,7 @@ U16 FARFN rtgetw_usb(
     __tmkRAMAddr_usb[realnum] = save_rama;
     GET_DIS_IRQ_SMP();
 //    outpw(port, save_rama);
-    buf_out[5] = 0;
+    buf_out[5] = WRITE_RG;
     buf_out[6] = port;
     buf_out[7] = save_rama;
     buf_out[8] = 0xFFFF;
@@ -3781,7 +3468,8 @@ void FARFN rtputw_usb(
   unsigned pos;
   unsigned data;
   unsigned save_rama, save_ramiw;
-  u16 buf_out[10];
+  u16 buf_out[12];
+  u16 buf_in[4];
   IRQ_FLAGS;
 
   CLRtmkError;
@@ -3800,43 +3488,41 @@ void FARFN rtputw_usb(
   __tmkRAMInWork_usb[realnum] = 1;
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    GET_DIS_IRQ_SMP();
-    outpw(MRTA_ADDR2(realnum), __hm400Page2_usb[num]);
-    REST_IRQ_SMP();
-#endif
   case __TA:
     pos = ((pos & 0xFFE0) << 1) | (pos & 0x1F);
     port += TMK_AddrPort;
     __tmkRAMAddr_usb[realnum] = pos;
     GET_DIS_IRQ_SMP();
 //    outpw(port, pos);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = port;
     buf_out[2] = pos;
     port += TMK_DataPort-TMK_AddrPort;
     data = pcData;
 //    outpw(port, data);
-    buf_out[3] = 0;
+    buf_out[3] = WRITE_RG;
     buf_out[4] = port;
     buf_out[5] = data;
     REST_IRQ_SMP();
     if (!save_ramiw)
     {
-      buf_out[6] = 0xFFFF;
-      Block_out_in(minor_table[realnum], buf_out, NULL);
+      buf_out[6] = READ_RG;
+      buf_out[7] = TA_BASE(realnum);
+      buf_out[8] = 0xFFFF;
+      Block_out_in(minor_table[realnum], buf_out, buf_in);
       break;
     }
     port += TMK_AddrPort-TMK_DataPort;
     __tmkRAMAddr_usb[realnum] = save_rama;
     GET_DIS_IRQ_SMP();
 //    outpw(port, save_rama);
-    buf_out[6] = 0;
+    buf_out[6] = WRITE_RG;
     buf_out[7] = port;
     buf_out[8] = save_rama;
-    buf_out[9] = 0xFFFF;
-    Block_out_in(minor_table[realnum], buf_out, NULL);
+    buf_out[9] = READ_RG;
+    buf_out[10] = TA_BASE(realnum);
+    buf_out[11] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     REST_IRQ_SMP();
     return;
   }
@@ -3854,7 +3540,8 @@ void FARFN rtsetanswbits_usb(
   unsigned type;
   unsigned port;
   unsigned bits;
-  u16 buf_out[4];
+  u16 buf_out[6];
+  u16 buf_in[4];
   IRQ_FLAGS;
 
   CLRtmkError;
@@ -3872,21 +3559,14 @@ void FARFN rtsetanswbits_usb(
     bits |= __rtControls1_usb[realnum];
     __rtControls1_usb[realnum] = bits;
 //    outpw(TA_MODE2(realnum), bits);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_MODE2(realnum);
     buf_out[2] = bits;
-    buf_out[3] = 0xFFFF;
-    Block_out_in(minor_table[realnum], buf_out, NULL);
+    buf_out[3] = READ_RG;
+    buf_out[4] = TA_BASE(realnum);
+    buf_out[5] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     break;
-#ifdef MRTA
-  case __MRTA:
-    CONVERT_TA_SW_BITS(bits, SetControl);
-    GET_MUTEX;
-    bits |= __rtControls1_usb[num];
-    __rtControls1_usb[num] = bits;
-    outpw(MRTA_SW(realnum), bits);
-    break;
-#endif
   }
   REST_MUTEX;
   return;
@@ -3902,7 +3582,8 @@ void FARFN rtclranswbits_usb(
   unsigned type;
   unsigned port;
   unsigned bits;
-  u16 buf_out[4];
+  u16 buf_out[6];
+  u16 buf_in[4];
   IRQ_FLAGS;
 
   CLRtmkError;
@@ -3921,22 +3602,14 @@ void FARFN rtclranswbits_usb(
     bits &= __rtControls1_usb[realnum];
     __rtControls1_usb[realnum] = bits;
 //    outpw(TA_MODE2(realnum), bits);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_MODE2(realnum);
     buf_out[2] = bits;
-    buf_out[3] = 0xFFFF;
-    Block_out_in(minor_table[realnum], buf_out, NULL);
+    buf_out[3] = READ_RG;
+    buf_out[4] = TA_BASE(realnum);
+    buf_out[5] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     break;
-#ifdef MRTA
-  case __MRTA:
-    CONVERT_TA_SW_BITS(bits, ClrControl);
-    bits = ~bits;
-    GET_MUTEX;
-    bits &= __rtControls1_usb[num];
-    __rtControls1_usb[num] = bits;
-    outpw(MRTA_SW(realnum), bits);
-    break;
-#endif
   }
   REST_MUTEX;
   return;
@@ -3953,9 +3626,6 @@ U16 FARFN rtgetanswbits_usb(
   unsigned bits = 0, bitst;
   u16 buf_out[3];
   u16 buf_in[4];
-#if NRT > 0
-  int realnum;
-#endif
 
   CLRtmkError;
   num = __tmkNumber_usb; //???
@@ -3966,7 +3636,7 @@ U16 FARFN rtgetanswbits_usb(
   {
   case __TA:
 //    bitst = inpw(TA_MODE2(num));
-    buf_out[0] = 1;
+    buf_out[0] = READ_RG;
     buf_out[1] = TA_MODE2(num);
     buf_out[2] = 0xFFFF;
     Block_out_in(minor_table[num], buf_out, buf_in);
@@ -3983,27 +3653,6 @@ U16 FARFN rtgetanswbits_usb(
     if (bitst & DNBA_MASK)
       bits |= DNBA;
     break;
-#ifdef MRTA
-  case __MRTA:
-//!!! bitst = __rtControls1[num];
-    realnum = GET_RealNum;
-    GET_DIS_IRQ();
-    outpw(TA_LCW(realnum), __rtControls1_usb[num]);
-    bitst = inpw(MRTA_SW(realnum));
-    REST_IRQ();
-    bits = 0;
-    if (bitst & SREQ_MASK)
-      bits |= SREQ;
-    if (bitst & BUSY_MASK)
-      bits |= BUSY;
-    if (bitst & SSFL_MASK)
-      bits |= SSFL;
-    if (bitst & RTFL_MASK)
-      bits |= RTFL;
-    if (bitst & DNBA_MASK)
-      bits |= DNBA;
-    break;
-#endif
   }
   bits &= RTAnswBitsMask;
   return bits;
@@ -4018,10 +3667,8 @@ int FARFN rtdefirqmode_usb(
   int num;
   unsigned type;
   unsigned bits;
-  u16 buf_out[4];
-#if NRT > 0
-  int realnum;
-#endif
+  u16 buf_out[6];
+  u16 buf_in[4];
 
   CLRtmkError;
   num = __tmkNumber_usb;
@@ -4041,31 +3688,16 @@ int FARFN rtdefirqmode_usb(
     __rtControls_usb[num] = bits;
     GET_DIS_IRQ_SMP();
 //    outpw(TA_MODE1(num), bits);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_MODE1(num);
     buf_out[2] = bits;
-    buf_out[3] = 0xFFFF;
-    Block_out_in(minor_table[num], buf_out, NULL);
+    buf_out[3] = READ_RG;
+    buf_out[4] = TA_BASE(num);
+    buf_out[5] = 0xFFFF;
+    Block_out_in(minor_table[num], buf_out, buf_in);
     REST_IRQ_SMP();
     REST_MUTEX;
     break;
-#ifdef MRTA
-  case __MRTA: //!!!it's possible to join with TA if use num as realnum
-    realnum = GET_RealNum;
-    bits = 0;
-    if (!(rtIrqModeBits & TMK_IRQ_OFF))
-      bits |= TA_IRQ_EN;
-    if (rtIrqModeBits & RT_DATA_BL)
-      bits |= TA_RT_DATA_INT_BLK;
-    GET_MUTEX;
-    bits |= __rtControls_usb[realnum] & ~(TA_IRQ_EN | TA_RT_DATA_INT_BLK);
-    __rtControls_usb[realnum] = bits;
-    GET_DIS_IRQ_SMP();
-    outpw(TA_MODE1(realnum), bits);
-    REST_IRQ_SMP();
-    REST_MUTEX;
-    break;
-#endif
   }
   return 0;
 }
@@ -4082,9 +3714,6 @@ U16 FARFN rtgetirqmode_usb(
   unsigned bitst;
   u16 buf_out[3];
   u16 buf_in[4];
-#if NRT > 0
-  int realnum;
-#endif
 
   CLRtmkError;
   num = __tmkNumber_usb;
@@ -4095,7 +3724,7 @@ U16 FARFN rtgetirqmode_usb(
   {
   case __TA:
 //    bitst = inpw(TA_MODE1(num));
-    buf_out[0] = 1;
+    buf_out[0] = READ_RG;
     buf_out[1] = TA_MODE1(num);
     buf_out[2] = 0xFFFF;
     Block_out_in(minor_table[num], buf_out, buf_in);
@@ -4106,27 +3735,12 @@ U16 FARFN rtgetirqmode_usb(
     if (bitst & TA_RT_DATA_INT_BLK)
       bits |= RT_DATA_BL;
     break;
-#ifdef MRTA
-  case __MRTA: //!!!it's possible to join with TA if use num as realnum
-    realnum = GET_RealNum;
-    bitst = inpw(TA_MODE1(realnum));
-    bits = RT_GENER1_BL|RT_GENER2_BL;
-    if (!(bitst & TA_IRQ_EN))
-      bits |= TMK_IRQ_OFF;
-    if (bitst & TA_RT_DATA_INT_BLK)
-      bits |= RT_DATA_BL;
-    break;
-#endif
   }
   return bits;
 }
 
 void DrvFlagMode_usb(int num, int m)
 {
-#ifdef MRTA
-  int __tmkNumber;
-  unsigned type = __tmkDrvType_usb[num];
-#endif
   unsigned data;
   unsigned i;
   u16 buf_out[11];
@@ -4139,23 +3753,6 @@ void DrvFlagMode_usb(int num, int m)
       {
   // disable rtlock if switch flag mode on
         data = (__rtMode_usb[num] >> 5) & 0x3F;
-#ifdef MRTA
-        if (type == __MRTA)
-        {
-          __tmkNumber = num;
-          __tmkNumber = GET_RealNum;
-          data |= __rtAddress_usb[num] << 6;
-          GET_DIS_IRQ_SMP();
-          outpw(MRTA_ADDR2(__tmkNumber), 0);
-//          DrvRtPokeTA(__tmkNumber, 0, data, (DrvRtPeekTA(__tmkNumber, 0, data) & 0x7FFF));
-          outpw(TA_ADDR(__tmkNumber), (0 << 6) + data);
-          data2 = inpw(TA_DATA(__tmkNumber));
-          outpw(TA_ADDR(__tmkNumber), (0 << 6) + data);
-          outpw(TA_DATA(__tmkNumber), data2 & 0x7FFF);
-          REST_IRQ_SMP();
-        }
-        else
-#endif
         {
           GET_DIS_IRQ_SMP();
 ////          DrvRtPokeTA(num, AdrTab, data, (DrvRtPeekTA(num, AdrTab, data) & 0x7FFF));
@@ -4163,7 +3760,7 @@ void DrvFlagMode_usb(int num, int m)
 //          data2 = inpw(TA_DATA(num));
 //          outpw(TA_ADDR(num), (AdrTab << 6) + data);
 //          outpw(TA_DATA(num), data2 & 0x7FFF);
-          buf_out[0] = 6;
+          buf_out[0] = MOD_MEM_AND;
           buf_out[1] = 1;
           buf_out[2] = (AdrTab << 6) + data;
           buf_out[3] = 0x7FFF;
@@ -4194,23 +3791,6 @@ void DrvFlagMode_usb(int num, int m)
       {
   // enable rtlock if switch flag mode off
         data = (__rtMode_usb[num] >> 5) & 0x3F;
-#ifdef MRTA
-        if (type == __MRTA)
-        {
-          __tmkNumber = num;
-          __tmkNumber = GET_RealNum;
-          data |= __rtAddress_usb[num] << 6;
-          GET_DIS_IRQ_SMP();
-          outpw(MRTA_ADDR2(__tmkNumber), 0);
-//          DrvRtPokeTA(__tmkNumber, 0, data, (DrvRtPeekTA(__tmkNumber, 0, data) & 0x7FFF));
-          outpw(TA_ADDR(__tmkNumber), (0 << 6) + data);
-          data2 = inpw(TA_DATA(__tmkNumber));
-          outpw(TA_ADDR(__tmkNumber), (0 << 6) + data);
-          outpw(TA_DATA(__tmkNumber), data2 & 0x7FFF);
-          REST_IRQ_SMP();
-        }
-        else
-#endif
         {
           GET_DIS_IRQ_SMP();
 ////          DrvRtPokeTA(num, AdrTab, data, (DrvRtPeekTA(num, AdrTab, data) | 0x8000));
@@ -4218,7 +3798,7 @@ void DrvFlagMode_usb(int num, int m)
 //          data2 = inpw(TA_DATA(num));
 //          outpw(TA_ADDR(num), (AdrTab << 6) + data);
 //          outpw(TA_DATA(num), data2 | 0x8000);
-          buf_out[0] = 6;
+          buf_out[0] = MOD_MEM_AND;
           buf_out[1] = 1;
           buf_out[2] = (AdrTab << 6) + data;
           buf_out[3] = 0xFFFF;
@@ -4230,53 +3810,6 @@ void DrvFlagMode_usb(int num, int m)
       }
     }
 
-#ifdef MRTA
-    if (type == __MRTA)
-    {
-      __tmkNumber = num;
-      __tmkNumber = GET_RealNum;
-      GET_DIS_IRQ_SMP();
-      outpw(MRTA_ADDR2(__tmkNumber), __hm400Page2_usb[num]);
-      REST_IRQ_SMP();
-      for (i = 1; i < 31; ++i)
-      {
-        data = (__hm400Page_usb[num] >> 5) | i;
-        if (m)
-        {
-          GET_DIS_IRQ_SMP();
-//          DrvRtPokeTA(__tmkNumber, data, 63, DrvRtPeekTA(__tmkNumber, data, 63) | 0x8000);
-          outpw(TA_ADDR(__tmkNumber), (data << 6) + 63);
-          data2 = inpw(TA_DATA(__tmkNumber));
-          outpw(TA_ADDR(__tmkNumber), (data << 6) + 63);
-          outpw(TA_DATA(__tmkNumber), data2 | 0x8000);
-          data |= 0x0020;
-//          DrvRtPokeTA(__tmkNumber, data, 63, DrvRtPeekTA(__tmkNumber, data, 63) | 0x8000);
-          outpw(TA_ADDR(__tmkNumber), (data << 6) + 63);
-          data2 = inpw(TA_DATA(__tmkNumber));
-          outpw(TA_ADDR(__tmkNumber), (data << 6) + 63);
-          outpw(TA_DATA(__tmkNumber), data2 | 0x8000);
-          REST_IRQ_SMP();
-        }
-        else
-        {
-          GET_DIS_IRQ_SMP();
-//          DrvRtPokeTA(__tmkNumber, data, 63, DrvRtPeekTA(__tmkNumber, data, 63) & 0x7FFF);
-          outpw(TA_ADDR(__tmkNumber), (data << 6) + 63);
-          data2 = inpw(TA_DATA(__tmkNumber));
-          outpw(TA_ADDR(__tmkNumber), (data << 6) + 63);
-          outpw(TA_DATA(__tmkNumber), data2 & 0x7FFF);
-          data |= 0x0020;
-//          DrvRtPokeTA(__tmkNumber, data, 63, DrvRtPeekTA(__tmkNumber, data, 63) & 0x7FFF);
-          outpw(TA_ADDR(__tmkNumber), (data << 6) + 63);
-          data2 = inpw(TA_DATA(__tmkNumber));
-          outpw(TA_ADDR(__tmkNumber), (data << 6) + 63);
-          outpw(TA_DATA(__tmkNumber), data2 & 0x7FFF);
-          REST_IRQ_SMP();
-        }
-      }
-    }
-    else
-#endif
     {
       for (i = 1; i < 31; ++i)
       {
@@ -4288,7 +3821,7 @@ void DrvFlagMode_usb(int num, int m)
 //          data2 = inpw(TA_DATA(num));
 //          outpw(TA_ADDR(num), (i << 6) + 63);
 //          outpw(TA_DATA(num), data2 | 0x8000);
-          buf_out[0] = 6;
+          buf_out[0] = MOD_MEM_AND;
           buf_out[1] = 1;
           buf_out[2] = (i << 6) + 63;
           buf_out[3] = 0xFFFF;
@@ -4298,7 +3831,7 @@ void DrvFlagMode_usb(int num, int m)
 //          data2 = inpw(TA_DATA(num));
 //          outpw(TA_ADDR(num), ((i|0x20) << 6) + 63);
 //          outpw(TA_DATA(num), data2 | 0x8000);
-          buf_out[5] = 6;
+          buf_out[5] = MOD_MEM_AND;
           buf_out[6] = 1;
           buf_out[7] = ((i|0x20) << 6) + 63;
           buf_out[8] = 0xFFFF;
@@ -4315,7 +3848,7 @@ void DrvFlagMode_usb(int num, int m)
 //          data2 = inpw(TA_DATA(num));
 //          outpw(TA_ADDR(num), (i << 6) + 63);
 //          outpw(TA_DATA(num), data2 & 0x7FFF);
-          buf_out[0] = 6;
+          buf_out[0] = MOD_MEM_AND;
           buf_out[1] = 1;
           buf_out[2] = (i << 6) + 63;
           buf_out[3] = 0x7FFF;
@@ -4325,7 +3858,7 @@ void DrvFlagMode_usb(int num, int m)
 //          data2 = inpw(TA_DATA(num));
 //          outpw(TA_ADDR(num), ((i|0x20) << 6) + 63);
 //          outpw(TA_DATA(num), data2 & 0x7FFF);
-          buf_out[5] = 6;
+          buf_out[5] = MOD_MEM_AND;
           buf_out[6] = 1;
           buf_out[7] = ((i|0x20) << 6) + 63;
           buf_out[8] = 0x7FFF;
@@ -4351,9 +3884,7 @@ int FARFN rtdefmode_usb(
   unsigned type;
   unsigned bits, bitst;
   u16 buf_out[4];
-#if NRT > 0
-  int realnum;
-#endif
+  u16 buf_in[4];
 
   CLRtmkError;
   num = __tmkNumber_usb;
@@ -4377,7 +3908,7 @@ int FARFN rtdefmode_usb(
 //    bits |= __rtDisableMask[num];
 
 //    outpw(TA_MODE2(num), bits);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_MODE2(num);
     buf_out[2] = bits;
     buf_out[3] = 0xFFFF;
@@ -4387,39 +3918,12 @@ int FARFN rtdefmode_usb(
       DrvFlagMode_usb(num, 1);
     else
       DrvFlagMode_usb(num, 0);
-    break;
-#ifdef MRTA
-  case __MRTA:
-    realnum = GET_RealNum;
-    if (bitst & DRV_HBIT_MODE)
-      bits |= TA_HBIT_MODE;
-    if (bitst & DRV_BRCST_MODE)
-      bits |= TA_BRCST_MODE;
-    GET_MUTEX;
-    bits |= __rtControls1_usb[realnum] & 0xFDEF;
-    __rtControls1_usb[realnum] = bits;
-    REST_MUTEX;
-    if (__hm400Page0_usb[num] != 0)
-    {
-      outpw(TA_MODE2(realnum), bits);
-      if (__rtControls1_usb[realnum] & TA_BRCST_MODE)
-        __dmrtBrc[realnum] |= 1L << __rtAddress_usb[num];
-      outpw(MRTA_SW(realnum), 0xF800 | __rtControls1_usb[realnum] | DrvMrtaBrcRtOn(realnum));
 
-      if (bitst & DRV_FLAG_MODE)
-        DrvFlagMode_usb(num, 1);
-      else
-        DrvFlagMode_usb(num, 0);
-    }
-    else
-    {
-      if (bitst & DRV_FLAG_MODE)
-        __FLAG_MODE_ON_usb[num] = 1;
-      else
-        __FLAG_MODE_ON_usb[num] = 0;
-    }
+    buf_out[0] = READ_RG;
+    buf_out[1] = TA_BASE(num);
+    buf_out[2] = 0xFFFF;
+    Block_out_in(minor_table[num], buf_out, buf_in);
     break;
-#endif
   }
   return 0;
 }
@@ -4433,9 +3937,6 @@ U16 FARFN rtgetmode_usb(
   int num;
   unsigned type;
   unsigned bits = 0, bitst;
-#if NRT > 0
-  int realnum;
-#endif
 
   CLRtmkError;
   num = __tmkNumber_usb;
@@ -4453,70 +3954,9 @@ U16 FARFN rtgetmode_usb(
     if (__FLAG_MODE_ON_usb[num])
       bits |= DRV_FLAG_MODE;
     break;
-#ifdef MRTA
-  case __MRTA:
-    realnum = GET_RealNum;
-    bitst = __rtControls1_usb[realnum];
-    bits = 0;
-    if (bitst & TA_HBIT_MODE)
-      bits |= DRV_HBIT_MODE;
-    if (bitst & TA_BRCST_MODE)
-      bits |= DRV_BRCST_MODE;
-    if (__FLAG_MODE_ON_usb[num])
-      bits |= DRV_FLAG_MODE;
-    break;
-#endif
   }
   return bits;
 }
-
-#if NRT > 0
-int FARFN mrtdefbrcpage_usb(
-#ifndef STATIC_TMKNUM
-        int __tmkNumber_usb,
-#endif
-        U16 BrcPage)
-{
-  int num;
-  unsigned type;
-  unsigned page;
-
-  CLRtmkError;
-  num = __tmkNumber_usb;
-  type = __tmkDrvType_usb[num];
-  CHECK_TMK_TYPE(type);
-  switch (type)
-  {
-  case __TA:
-    return USER_ERROR(RT_BAD_FUNC);
-#ifdef MRTA
-  case __MRTA:
-    page = BrcPage;
-    if (page > 0)
-      return USER_ERROR(RT_BAD_PAGE);
-    __rtPagePC_usb[num] =  __rtMaxPage_usb[num] + 1;
-//    __rtPageBus[num] =   __rtMaxPage[num] + 1;
-    __hm400Page2_usb[num] = MRTA_BRC_PAGE >> 4;
-    __hm400Page_usb[num] = (U16)(MRTA_BRC_PAGE << 11);
-    break;
-#endif
-  }
-  return 0;
-}
-
-U16 FARFN mrtgetbrcpage_usb(
-#ifndef STATIC_TMKNUM
-        int __tmkNumber_usb
-#endif
-        )
-{
-//  int num;
-
-  CLRtmkError;
-//  num = __tmkNumber_usb;
-  return 0;
-}
-#endif //NRT
 
 int FARFN rtdefpage_usb(
 #ifndef STATIC_TMKNUM
@@ -4533,14 +3973,6 @@ int FARFN rtdefpage_usb(
   type = __tmkDrvType_usb[num];
   CHECK_TMK_TYPE(type);
   page = rtPage;
-#ifdef MRTA
-  if (type == __MRTA)
-  {
-    if (page > (__rtMaxPage_usb[num] + 1))
-      return USER_ERROR(RT_BAD_PAGE);
-  }
-  else
-#endif
   {
     CHECK_RT_PAGE_BX(num, page);
   }
@@ -4550,20 +3982,6 @@ int FARFN rtdefpage_usb(
   {
   case __TA:
     break;
-#ifdef MRTA
-  case __MRTA:
-    if (page <= __rtMaxPage_usb[num])
-    { //std page 0
-      __hm400Page2_usb[num] = __hm400Page0_usb[num] >> 4;
-      __hm400Page_usb[num] = __hm400Page0_usb[num] << 11;
-    }
-    else
-    { //brc page 0
-      __hm400Page2_usb[num] = MRTA_BRC_PAGE >> 4;
-      __hm400Page_usb[num] = (U16)(MRTA_BRC_PAGE << 11);
-    }
-    break;
-#endif
   }
   return 0;
 }
@@ -4609,14 +4027,6 @@ int FARFN rtdefpagepc_usb(
   type = __tmkDrvType_usb[num];
   CHECK_TMK_TYPE(type);
   page = PagePC;
-#ifdef MRTA
-  if (type == __MRTA)
-  {
-    if (page > (__rtMaxPage_usb[num] + 1))
-      return USER_ERROR(RT_BAD_PAGE);
-  }
-  else
-#endif
   {
     CHECK_RT_PAGE_BX(num, page);
   }
@@ -4624,21 +4034,6 @@ int FARFN rtdefpagepc_usb(
   {
   case __TA:
     return USER_ERROR(RT_BAD_FUNC);
-#ifdef MRTA
-  case __MRTA:
-    __rtPagePC_usb[num] = page;
-    if (page <= __rtMaxPage_usb[num])
-    { //std page 0
-      __hm400Page2_usb[num] = __hm400Page0_usb[num] >> 4;
-      __hm400Page_usb[num] = __hm400Page0_usb[num] << 11;
-    }
-    else
-    { //brc page 0
-      __hm400Page2_usb[num] = MRTA_BRC_PAGE >> 4;
-      __hm400Page_usb[num] = (U16)(MRTA_BRC_PAGE << 11);
-    }
-    break;
-#endif
   }
   return 0;
 }
@@ -4662,9 +4057,6 @@ int FARFN rtdefpagebus_usb(
   switch (type)
   {
   case __TA:
-#ifdef MRTA
-  case __MRTA:
-#endif
     return USER_ERROR(RT_BAD_FUNC);
   }
   return 0;
@@ -4705,10 +4097,8 @@ U16 FARFN rtenable_usb(
   int num;
   unsigned type;
   unsigned mask, maskbrc;
-  u16 buf_out[10];
-#if NRT > 0
-  int realnum;
-#endif
+  u16 buf_out[12];
+  u16 buf_in[4];
 
   CLRtmkError;
   num = __tmkNumber_usb;
@@ -4738,71 +4128,25 @@ U16 FARFN rtenable_usb(
       GET_MUTEX;
       GET_DIS_IRQ_SMP();
 //      outpw(TA_MODE1(num), __rtControls[num] & ~TA_RTMT_START);
-      buf_out[0] = 0;
+      buf_out[0] = WRITE_RG;
       buf_out[1] = TA_MODE1(num);
       buf_out[2] = __rtControls_usb[num] & ~TA_RTMT_START;
 //      outpw(TA_MODE2(num), (__rtControls1[num])); // & maskbrc) | mask;
-      buf_out[3] = 0;
+      buf_out[3] = WRITE_RG;
       buf_out[4] = TA_MODE2(num);
       buf_out[5] = __rtControls1_usb[num];
       __rtControls_usb[num] = (__rtControls_usb[num] & ~TA_RTMT_START) | (TA_RTMT_START & (maskbrc>>1));
 //      outpw(TA_MODE1(num), __rtControls[num]);
-      buf_out[6] = 0;
+      buf_out[6] = WRITE_RG;
       buf_out[7] = TA_MODE1(num);
       buf_out[8] = __rtControls_usb[num];
-      buf_out[9] = 0xFFFF;
-      Block_out_in(minor_table[num], buf_out, NULL);
+      buf_out[9] = READ_RG;
+      buf_out[10] = TA_BASE(num);
+      buf_out[11] = 0xFFFF;
+      Block_out_in(minor_table[num], buf_out, buf_in);
       REST_IRQ_SMP();
       REST_MUTEX;
       break;
-#ifdef MRTA
-    case __MRTA:
-      realnum = GET_RealNum;
-      if (num == realnum)
-        break;
-      if (mask)
-      {
-        __dmrtRT[realnum] &= ~(1L << __rtAddress_usb[num]);
-        __dmrtBrc[realnum] &= ~(1L << __rtAddress_usb[num]);
-        GET_MUTEX;
-        __rtControls1_usb[num] &= ~MRTA_RT_ON;
-        outpw(MRTA_SW(realnum), __rtControls1_usb[num]);
-        REST_MUTEX;
-        if (DrvMrtaBrcRtOn(realnum) == 0)
-          outpw(MRTA_SW(realnum), 0xF800);
-        if (__dmrtRT[realnum] == 0L && __dmrtBrc[realnum] == 0L)
-        {
-          GET_MUTEX;
-          GET_DIS_IRQ_SMP();
-          __rtControls_usb[realnum] &= ~TA_RTMT_START;
-          outpw(TA_MODE1(realnum), __rtControls_usb[realnum]);
-          REST_IRQ_SMP();
-          REST_MUTEX;
-        }
-      }
-      else
-      {
-        __dmrtRT[realnum] |= 1L << __rtAddress_usb[num];
-        if (__rtControls1_usb[num] & TA_BRCST_MODE)
-          __dmrtBrc[realnum] |= 1L << __rtAddress_usb[num];
-        GET_MUTEX;
-        __rtControls1_usb[num] |= MRTA_RT_ON;
-        outpw(MRTA_SW(realnum), __rtControls1_usb[num]);
-        REST_MUTEX;
-        outpw(MRTA_SW(realnum), 0xF800 | __rtControls1_usb[realnum] | DrvMrtaBrcRtOn(realnum));
-        if ((__rtControls_usb[realnum] & TA_RTMT_START) == 0 && (__dmrtRT[realnum] != 0L || __dmrtBrc[realnum] != 0L))
-        {
-          GET_MUTEX;
-          GET_DIS_IRQ_SMP();
-          __rtControls_usb[realnum] |= TA_RTMT_START;
-          outpw(TA_MODE1(realnum), __rtControls_usb[realnum]);
-          REST_IRQ_SMP();
-          REST_MUTEX;
-        }
-        DrvRtWMode_usb(num, __MRTA, 0);
-      }
-      break;
-#endif
     }
     break;
   default:
@@ -4820,12 +4164,8 @@ int FARFN rtdefaddress_usb(
   int num;
   unsigned type;
   unsigned rtaddr;
-  u16 buf_out[10];
-#if NRT > 0
-  int realnum;
-  int fEnable = 0;
-  int rtctrl;
-#endif
+  u16 buf_out[12];
+  u16 buf_in[4];
 
   CLRtmkError;
   num = __tmkNumber_usb;
@@ -4839,9 +4179,6 @@ int FARFN rtdefaddress_usb(
   {
     if (__rtEnableOnAddr_usb[num])
     {
-#if NRT > 0
-      fEnable = 1;
-#endif
       __rtDisableMask_usb[num] = 0;  //; RT_ENABLE
       __rtBRCMask_usb[num] = 0xFFFF;
     }
@@ -4853,7 +4190,7 @@ int FARFN rtdefaddress_usb(
     GET_MUTEX;
     GET_DIS_IRQ_SMP();
 //    outpw(TA_MODE1(num), __rtControls[num] & ~TA_RTMT_START);
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_MODE1(num);
     buf_out[2] = __rtControls_usb[num] & ~TA_RTMT_START;
     rtaddr |= __rtControls1_usb[num] & 0x07FF;
@@ -4863,80 +4200,20 @@ int FARFN rtdefaddress_usb(
 //    rtaddr |= __rtDisableMask[num];
 
 //    outpw(TA_MODE2(num), rtaddr);
-    buf_out[3] = 0;
+    buf_out[3] = WRITE_RG;
     buf_out[4] = TA_MODE2(num);
     buf_out[5] = rtaddr;
 //    outpw(TA_MODE1(num), __rtControls[num]);
-    buf_out[6] = 0;
+    buf_out[6] = WRITE_RG;
     buf_out[7] = TA_MODE1(num);
     buf_out[8] = __rtControls_usb[num];
-    buf_out[9] = 0xFFFF;
-    Block_out_in(minor_table[num], buf_out, NULL);
+    buf_out[9] = READ_RG;
+    buf_out[10] = TA_BASE(num);
+    buf_out[11] = 0xFFFF;
+    Block_out_in(minor_table[num], buf_out, buf_in);
     REST_IRQ_SMP();
     REST_MUTEX;
     break;
-#ifdef MRTA
-  case __MRTA:
-    realnum = GET_RealNum;
-    if (num == realnum)
-      break;
-//    if (__dmrtRT[realnum] & (1L << rtaddr))
-//      USER_ERROR(RT_BAD_ADDRESS)
-    rtctrl = __rtControls1_usb[num] | __FLAG_MODE_ON_usb[num]; // previous ctrl
-    rtaddr = rtctrl >> 11;   // previous addr
-    if (rtaddr != 31 && rtaddr != __rtAddress_usb[num])
-    {
-      __dmrtRT[realnum] &= ~(1L << rtaddr);
-      __dmrtBrc[realnum] &= ~(1L << rtaddr);
-      __mrtA2RT[realnum][rtaddr] = 0;
-      GET_MUTEX;
-      __rtControls1_usb[num] &= ~(MRTA_RT_ON | TA_BRCST_MODE);
-      outpw(MRTA_SW(realnum), __rtControls1_usb[num]);
-      REST_MUTEX;
-      if (DrvMrtaBrcRtOn(realnum) == 0)
-        outpw(MRTA_SW(realnum), 0xF800);
-      DrvFlagMode_usb(num, 0);
-    }
-    if (rtaddr != __rtAddress_usb[num]) // aka rtreset (+ all settings after) for new RT !
-    {
-      rtaddr = __rtAddress_usb[num];
-      __mrtA2RT[realnum][rtaddr] = num;
-      __hm400Page0_usb[num] = 0x20 | rtaddr;
-      __hm400Page2_usb[num] = __hm400Page0_usb[num] >> 4; //rtdefpage(0)
-      __hm400Page_usb[num] = __hm400Page0_usb[num] << 11;
-      mrtcreattab_usb(realnum, rtaddr);
-      if (rtctrl & 1) // flag mode?
-        DrvFlagMode_usb(num, 1);
-      DrvRtWMode_usb(num, __MRTA, 0);
-      if (__rtDisableMask_usb[num])
-      {
-        __rtControls1_usb[num] = ((rtctrl & 0x07FF) | (rtaddr << 11)) & ~MRTA_RT_ON;
-        __dmrtRT[realnum] &= ~(1L << rtaddr);
-        __dmrtBrc[realnum] &= ~(1L << rtaddr);
-      }
-      else
-      {
-        __rtControls1_usb[num] = (rtctrl & 0x07FF) | (rtaddr << 11) | MRTA_RT_ON;
-        __dmrtRT[realnum] |= 1L << rtaddr;
-        if (__rtControls1_usb[num] & TA_BRCST_MODE)
-          __dmrtBrc[realnum] |= 1L << rtaddr;
-      }
-      GET_MUTEX;
-      outpw(MRTA_SW(realnum), __rtControls1_usb[num]);
-      REST_MUTEX;
-      outpw(MRTA_SW(realnum), 0xF800 | __rtControls1_usb[realnum] | DrvMrtaBrcRtOn(realnum));
-      if ((__rtControls_usb[realnum] & TA_RTMT_START) == 0 && (__dmrtRT[realnum] != 0L || __dmrtBrc[realnum] != 0L))
-      {
-        GET_MUTEX;
-        GET_DIS_IRQ_SMP();
-        __rtControls_usb[realnum] |= TA_RTMT_START;
-        outpw(TA_MODE1(realnum), __rtControls_usb[realnum]);
-        REST_IRQ_SMP();
-        REST_MUTEX;
-      }
-    }
-    break;
-#endif
   }
   return 0;
 }
@@ -4959,12 +4236,8 @@ U16 FARFN rtgetaddress_usb(
   CHECK_TMK_DEVICEN(num);
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    return __rtAddress_usb[num];
-#endif
   case __TA:
-    buf_out[0] = 1;
+    buf_out[0] = READ_RG;
     buf_out[1] = TA_MODE2(num);
     buf_out[2] = 0xFFFF;
     Block_out_in(minor_table[num], buf_out, buf_in);
@@ -5014,9 +4287,6 @@ void FARFN rtgetflags_usb(
   __tmkRAMInWork_usb[realnum] = 1;
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-#endif
   case __TA:
     pos = FlagMin;
     do
@@ -5050,6 +4320,8 @@ void FARFN rtputflags_usb(
   unsigned len;
   unsigned dir;
   U16 FARDT *buf;
+  u16 buf_out[3];
+  u16 buf_in[4];
   unsigned save_rama, save_ramiw;
   IRQ_FLAGS;
 
@@ -5078,9 +4350,6 @@ void FARFN rtputflags_usb(
   __tmkRAMInWork_usb[realnum] = 1;
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-#endif
   case __TA:
     pos = FlagMin;
     do
@@ -5093,6 +4362,10 @@ void FARFN rtputflags_usb(
       ++pos;
     }
     while (--len);
+    buf_out[0] = READ_RG;
+    buf_out[1] = TA_BASE(realnum);
+    buf_out[2] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
     break;
   }
   __tmkRAMInWork_usb[realnum] = 0;
@@ -5108,7 +4381,8 @@ void FARFN rtsetflag_usb(
   int num;
   unsigned type;
   unsigned sa;
-  u16 buf_out[6];
+  u16 buf_out[8];
+  u16 buf_in[4];
 
   CLRtmkError;
   num = __tmkNumber_usb;
@@ -5140,25 +4414,26 @@ void FARFN rtsetflag_usb(
 //      data = inpw(TA_DATA(num));
       if (sa & 0x20)//true
       {
-        buf_out[0] = 6;
+        buf_out[0] = MOD_MEM_AND;
         buf_out[1] = 1;
         buf_out[2] = (AdrTab << 6) + sa;
         buf_out[3] = 0x7FFF;
         buf_out[4] = 0;
-        buf_out[5] = 0xFFFF;
 //        data &= 0x7FFF;
       }
       else
       {
-        buf_out[0] = 6;
+        buf_out[0] = MOD_MEM_AND;
         buf_out[1] = 1;
         buf_out[2] = (AdrTab << 6) + sa;
         buf_out[3] = 0xFFFF;
         buf_out[4] = 0x8000;
-        buf_out[5] = 0xFFFF;
 //        data |= 0x8000;
       }
-      Block_out_in(minor_table[num], buf_out, NULL);
+      buf_out[5] = READ_RG;
+      buf_out[6] = TA_BASE(num);
+      buf_out[7] = 0xFFFF;
+      Block_out_in(minor_table[num], buf_out, buf_in);
 ////      DrvRtPokeTA(num, AdrTab, sa, data);
 //      outpw(TA_ADDR(num), (AdrTab << 6) + sa);
 //      outpw(TA_DATA(num), data);
@@ -5166,37 +4441,6 @@ void FARFN rtsetflag_usb(
 //      DrvRtDefSubAddr_usb(num, type, sa);
     }
     break;
-#ifdef MRTA
-  case __MRTA:
-    sa >>= 5;
-    if (!__FLAG_MODE_ON_usb[num])
-    {
-      if (sa & 0x20)
-        __RT_BC_FLAG_usb[num][sa&0x1f] = 0x8000;
-      else
-        __BC_RT_FLAG_usb[num][sa&0x1f] = 0x8000;
-    }
-    else
-    {
-      int realnum;
-      realnum = GET_RealNum;
-      GET_DIS_IRQ_SMP();
-      outpw(MRTA_ADDR2(realnum), 0);
-//      data = DrvRtPeekTA(realnum, __rtAddress[num], sa);
-      outpw(TA_ADDR(realnum), (__rtAddress_usb[num] << 6) + sa);
-      data = inpw(TA_DATA(realnum));
-      if (sa & 0x20)
-        data &= 0x7FFF;
-      else
-        data |= 0x8000;
-//      DrvRtPokeTA(realnum, __rtAddress[num], sa, data);
-      outpw(TA_ADDR(realnum), (__rtAddress_usb[num] << 6) + sa);
-      outpw(TA_DATA(realnum), data);
-      REST_IRQ_SMP();
-//      DrvRtDefSubAddr_usb(num, type, sa);
-    }
-    break;
-#endif
   }
   return;
 }
@@ -5210,7 +4454,8 @@ void FARFN rtclrflag_usb(
   int num;
   unsigned type;
   unsigned sa;
-  u16 buf_out[6];
+  u16 buf_out[8];
+  u16 buf_in[4];
 
   CLRtmkError;
   num = __tmkNumber_usb;
@@ -5242,25 +4487,26 @@ void FARFN rtclrflag_usb(
 //      data = inpw(TA_DATA(num));
       if (sa & 0x20)
       {
-        buf_out[0] = 6;
+        buf_out[0] = MOD_MEM_AND;
         buf_out[1] = 1;
         buf_out[2] = (AdrTab << 6) + sa;
         buf_out[3] = 0xFFFF;
         buf_out[4] = 0x8000;
-        buf_out[5] = 0xFFFF;
 //        data |= 0x8000;
       }
       else
       {
-        buf_out[0] = 6;
+        buf_out[0] = MOD_MEM_AND;
         buf_out[1] = 1;
         buf_out[2] = (AdrTab << 6) + sa;
         buf_out[3] = 0x7FFF;
         buf_out[4] = 0;
-        buf_out[5] = 0xFFFF;
 //        data &= 0x7FFF;
       }
-      Block_out_in(minor_table[num], buf_out, NULL);
+      buf_out[5] = READ_RG;
+      buf_out[6] = TA_BASE(num);
+      buf_out[7] = 0xFFFF;
+      Block_out_in(minor_table[num], buf_out, buf_in);
 ////      DrvRtPokeTA(num, AdrTab, sa, data);
 //      outpw(TA_ADDR(num), (AdrTab << 6) + sa);
 //      outpw(TA_DATA(num), data);
@@ -5268,37 +4514,6 @@ void FARFN rtclrflag_usb(
 //      DrvRtDefSubAddr(num, type, sa);
     }
     break;
-#ifdef MRTA
-  case __MRTA:
-    sa >>= 5;
-    if (!__FLAG_MODE_ON_usb[num])
-    {
-      if (sa & 0x20)
-        __RT_BC_FLAG_usb[num][sa&0x1f] = 0x0000;
-      else
-        __BC_RT_FLAG_usb[num][sa&0x1f] = 0x0000;
-    }
-    else
-    {
-      int realnum;
-      realnum = GET_RealNum;
-      GET_DIS_IRQ_SMP();
-      outpw(MRTA_ADDR2(realnum), 0);
-//      data = DrvRtPeekTA(realnum, __rtAddress[num], sa);
-      outpw(TA_ADDR(realnum), (__rtAddress_usb[num] << 6) + sa);
-      data = inpw(TA_DATA(realnum));
-      if (sa & 0x20)
-        data |= 0x8000;
-      else
-        data &= 0x7FFF;
-//      DrvRtPokeTA(realnum, __rtAddress[num], sa, data);
-      outpw(TA_ADDR(realnum), (__rtAddress_usb[num] << 6) + sa);
-      outpw(TA_DATA(realnum), data);
-      REST_IRQ_SMP();
-//      DrvRtDefSubAddr(num, type, sa);
-    }
-    break;
-#endif
   }
   return;
 }
@@ -5314,7 +4529,8 @@ void FARFN rtputflag_usb(
   unsigned sa;
   unsigned dir;
   unsigned pos;
-  u16 buf_out[6];
+  u16 buf_out[8];
+  u16 buf_in[4];
 
   CLRtmkError;
   num = __tmkNumber_usb;
@@ -5351,22 +4567,20 @@ void FARFN rtputflag_usb(
       {
         if (dir)
         {
-          buf_out[0] = 6;
+          buf_out[0] = MOD_MEM_AND;
           buf_out[1] = 1;
           buf_out[2] = (AdrTab << 6) + pos;
           buf_out[3] = 0x7FFF;
           buf_out[4] = 0;
-          buf_out[5] = 0xFFFF;
 //          data &= 0x7FFF;
         }
         else
         {
-          buf_out[0] = 6;
+          buf_out[0] = MOD_MEM_AND;
           buf_out[1] = 1;
           buf_out[2] = (AdrTab << 6) + pos;
           buf_out[3] = 0xFFFF;
           buf_out[4] = 0x8000;
-          buf_out[5] = 0xFFFF;
 //          data |= 0x8000;
         }
       }
@@ -5374,26 +4588,27 @@ void FARFN rtputflag_usb(
       {
         if (dir)
         {
-          buf_out[0] = 6;
+          buf_out[0] = MOD_MEM_AND;
           buf_out[1] = 1;
           buf_out[2] = (AdrTab << 6) + pos;
           buf_out[3] = 0xFFFF;
           buf_out[4] = 0x8000;
-          buf_out[5] = 0xFFFF;
 //          data |= 0x8000;
         }
         else
         {
-          buf_out[0] = 6;
+          buf_out[0] = MOD_MEM_AND;
           buf_out[1] = 1;
           buf_out[2] = (AdrTab << 6) + pos;
           buf_out[3] = 0x7FFF;
           buf_out[4] = 0;
-          buf_out[5] = 0xFFFF;
 //          data &= 0x7FFF;
         }
       }
-      Block_out_in(minor_table[num], buf_out, NULL);
+      buf_out[5] = READ_RG;
+      buf_out[6] = TA_BASE(num);
+      buf_out[7] = 0xFFFF;
+      Block_out_in(minor_table[num], buf_out, buf_in);
 ////      DrvRtPokeTA(num, AdrTab, pos, data);
 //      outpw(TA_ADDR(num), (AdrTab << 6) + pos);
 //      outpw(TA_DATA(num), data);
@@ -5401,51 +4616,6 @@ void FARFN rtputflag_usb(
 //      DrvRtDefSubAddr(num, type, sa);
     }
     break;
-#ifdef MRTA
-  case __MRTA:
-    if (!__FLAG_MODE_ON_usb[num])
-    {
-      if (sa & 0x20)
-        __RT_BC_FLAG_usb[num][sa&0x1f] = 0x0000;
-      else
-        __BC_RT_FLAG_usb[num][sa&0x1f] = 0x0000;
-    }
-    else
-    {
-      int realnum;
-      realnum = GET_RealNum;
-      pos = sa | (dir >> 5);
-      GET_DIS_IRQ_SMP();
-      outpw(MRTA_ADDR2(realnum), 0);
-//      data = DrvRtPeekTA(realnum, __rtAddress[num], pos);
-      outpw(TA_ADDR(realnum), (__rtAddress_usb[num] << 6) + pos);
-      data = inpw(TA_DATA(realnum));
-      if (Flag & 0x8000)
-      {
-        if (dir)
-          data &= 0x7FFF;
-        else
-          data |= 0x8000;
-      }
-      else
-      {
-        if (dir)
-          data |= 0x8000;
-        else
-          data &= 0x7FFF;
-      }
-//      DrvRtPokeTA(realnum, __rtAddress[num], pos, data);
-      outpw(TA_ADDR(realnum), (__rtAddress_usb[num] << 6) + pos);
-      outpw(TA_DATA(realnum), data);
-      outpw(MRTA_ADDR2(realnum), __hm400Page0_usb[num] >> 4);
-//      DrvRtPokeTA(realnum, (__hm400Page0[num] << 6) | pos, 58, Flag & 0x7FFF);
-      outpw(TA_ADDR(realnum), (((__hm400Page0_usb[num] << 6) | pos) << 6) + 58);
-      outpw(TA_DATA(realnum), Flag & 0x7FFF);
-      REST_IRQ_SMP();
-//      DrvRtDefSubAddr(num, type, sa);
-    }
-    break;
-#endif
   }
   return;
 }
@@ -5495,10 +4665,10 @@ U16 FARFN rtgetflag_usb(
 ////      flag = DrvRtPeekTA(num, AdrTab, pos);
 //      outpw(TA_ADDR(num), (AdrTab << 6) + pos);
 //      flag = inpw(TA_DATA(num));
-      buf_out[0] = 3;
+      buf_out[0] = READ_MEM;
       buf_out[1] = 2;
       buf_out[2] = (AdrTab << 6) + pos;
-      buf_out[3] = 3;
+      buf_out[3] = READ_MEM;
       buf_out[4] = 2;
       buf_out[5] = (pos << 6) + 58;
       buf_out[6] = 0xFFFF;
@@ -5519,41 +4689,6 @@ U16 FARFN rtgetflag_usb(
       REST_IRQ_SMP();
     }
     break;
-#ifdef MRTA
-  case __MRTA:
-    if (!__FLAG_MODE_ON_usb[num])
-    {
-      if (dir)
-        flag = __RT_BC_FLAG_usb[num][sa];
-      else
-        flag = __BC_RT_FLAG_usb[num][sa];
-    }
-    else
-    {
-      int realnum;
-      realnum = GET_RealNum;
-      pos = sa | (dir >> 5);
-      GET_DIS_IRQ_SMP();
-      outpw(MRTA_ADDR2(realnum), 0);
-//      flag = DrvRtPeekTA(realnum, __rtAddress[num], pos);
-      outpw(TA_ADDR(realnum), (__rtAddress_usb[num] << 6) + pos);
-      flag = inpw(TA_DATA(realnum));
-      if (dir)
-      {
-        flag = (~flag) & 0x8000;
-      }
-      else
-      {
-        flag = flag & 0x8000;
-      }
-      outpw(MRTA_ADDR2(realnum), __hm400Page0_usb[num] >> 4);
-//      flag |= DrvRtPeekTA(realnum, (__hm400Page0[num] << 6) | pos, 58) & 0x07FF;
-      outpw(TA_ADDR(realnum), (((__hm400Page0_usb[num] << 6) | pos) << 6) + 58);
-      flag |= inpw(TA_DATA(realnum)) & 0x07FF;
-      REST_IRQ_SMP();
-    }
-    break;
-#endif
   }
   DrvRtDefSubAddr_usb(num, type, (sa << 5) | dir);
   return flag;
@@ -5582,7 +4717,7 @@ int FARFN rtbusy_usb(
   {
   case __TA:
 //    state = inpw(TA_BASE(realnum));
-    buf_out[0] = 1;
+    buf_out[0] = READ_RG;
     buf_out[1] = TA_BASE(realnum);
     buf_out[2] = 0xFFFF;
     Block_out_in(minor_table[realnum], buf_out, buf_in);
@@ -5592,62 +4727,9 @@ int FARFN rtbusy_usb(
     else
       state = 0;
     break;
-#ifdef MRTA
-  case __MRTA:
-    GET_DIS_IRQ();
-    outpw(TA_LCW(realnum), __rtControls1_usb[__tmkNumber]);
-    state = inpw(TA_BASE(realnum));
-    REST_IRQ();
-    if (((state & 0x0FFF) == (((__rtSubAddr_usb[__tmkNumber] | __hm400Page_usb[__tmkNumber]) >> 5) | 0x0800)))
-      state >>= 2;
-    else
-      state = 0;
-    break;
-#endif
   }
   return (state >> 11) & 1;
 }
-
-#if NRT > 0
-U16 FARFN mrtgetstate_usb(
-#ifndef STATIC_TMKNUM
-        int __tmkNumber_usb
-#endif
-        )
-{
-  int realnum;
-  unsigned type;
-  unsigned port;
-  unsigned state = 0, statex;
-
-  CLRtmkError;
-  realnum = GET_RealNum;
-  type = __tmkDrvType_usb[realnum];
-  CHECK_TMK_TYPE(type);
-  port = __tmkPortsAddr1_usb[realnum];
-  switch (type)
-  {
-  case __TA:
-    state = inpw(TA_LCW(realnum)) & 0x7FF;
-    statex = inpw(TA_BASE(realnum));
-    if ((statex&0x03FF) == (DrvRtGetBaseTA_usb(realnum)&0x03FF))
-      state |= (statex & 0x2000) >> 2;
-    break;
-#ifdef MRTA
-  case __MRTA:
-    GET_DIS_IRQ();
-    outpw(TA_LCW(realnum), __rtControls1_usb[__tmkNumber]);
-    state = inpw(TA_LCW(realnum)) & 0x7FF;
-    statex = inpw(TA_BASE(realnum));
-    REST_IRQ();
-    if (((statex & 0x0FFF) == (((__rtSubAddr_usb[__tmkNumber] | __hm400Page_usb[__tmkNumber]) >> 5) | 0x0800)))
-      state |= (statex & 0x2000) >> 2;
-    break;
-#endif
-  }
-  return state;
-}
-#endif //NRT
 
 U16 FARFN rtgetstate_usb(
 #ifndef STATIC_TMKNUM
@@ -5676,9 +4758,9 @@ U16 FARFN rtgetstate_usb(
   case __TA:
 //    state = inpw(TA_LCW(realnum)) & 0x7FF;
 //    statex = inpw(TA_BASE(realnum));
-    buf_out[0] = 1;
+    buf_out[0] = READ_RG;
     buf_out[1] = TA_LCW(realnum);
-    buf_out[2] = 1;
+    buf_out[2] = READ_RG;
     buf_out[3] = TA_BASE(realnum);
     buf_out[4] = 0xFFFF;
     Block_out_in(minor_table[realnum], buf_out, buf_in);
@@ -5687,17 +4769,6 @@ U16 FARFN rtgetstate_usb(
     if ((statex&0x03FF) == (DrvRtGetBaseTA_usb(realnum)&0x03FF))
       state |= (statex & 0x2000) >> 2;
     break;
-#ifdef MRTA
-  case __MRTA:
-    GET_DIS_IRQ();
-    outpw(TA_LCW(realnum), __rtControls1_usb[num]);
-    state = inpw(TA_LCW(realnum)) & 0x7FF;
-    statex = inpw(TA_BASE(realnum));
-    REST_IRQ();
-    if (((statex & 0x0FFF) == (((__rtSubAddr_usb[num] | __hm400Page_usb[num]) >> 5) | 0x0800)))
-      state |= (statex & 0x2000) >> 2;
-    break;
-#endif
   }
   return state;
 }
@@ -5793,10 +4864,10 @@ U16 FARFN rtgetcmddata_usb(
 ////    data = DrvRtPeekTA(num, 0x1F, 0);
 //    outpw(TA_ADDR(num), (0x1F << 6) + 0);
 //    data = inpw(TA_DATA(num));
-    buf_out[0] = 0;
+    buf_out[0] = WRITE_RG;
     buf_out[1] = TA_ADDR(num);
     buf_out[2] = (0x1F << 6);
-    buf_out[3] = 1;
+    buf_out[3] = READ_RG;
     buf_out[4] = TA_DATA(num);
     buf_out[5] = 0xFFFF;
     Block_out_in(minor_table[num], buf_out, buf_in);
@@ -5804,24 +4875,6 @@ U16 FARFN rtgetcmddata_usb(
     REST_IRQ_SMP();
     return (U16)data;
     }
-#ifdef MRTA
-  case __MRTA:
-// very simple assuming SyncWData commands only
-// need to mantain an array of cmddatas for full compatibility
-    {
-    unsigned data;
-    int realnum;
-    realnum = GET_RealNum;
-    GET_DIS_IRQ_SMP();
-    // page depend on std/brc (programmer can use any page)
-    outpw(MRTA_ADDR2(realnum), __hm400Page2_usb[num]);
-//    data = DrvRtPeekTA(realnum, (__hm400Page[num] >> 5) | 0x1F, 0);
-    outpw(TA_ADDR(realnum), (((__hm400Page_usb[num] >> 5) | 0x1F) << 6) + 0);
-    data = inpw(TA_DATA(realnum));
-    REST_IRQ_SMP();
-    return (U16)data;
-    }
-#endif
   }
   return 0;
 }
@@ -5834,7 +4887,8 @@ void FARFN rtputcmddata_usb(
 {
   int num;
   unsigned type;
-  u16 buf_out[7];
+  u16 buf_out[9];
+  u16 buf_in[4];
   DEF_VAR(unsigned, cmd);
 
   CLRtmkError;
@@ -5855,56 +4909,35 @@ void FARFN rtputcmddata_usb(
 ////      DrvRtPokeTA(num, 0x20, 0, rtData);
 //      outpw(TA_ADDR(num), (0x20 << 6) + 0);
 //      outpw(TA_DATA(num), rtData);
-      buf_out[0] = 0;
+      buf_out[0] = WRITE_RG;
       buf_out[1] = TA_ADDR(num);
       buf_out[2] = (0x20 << 6);
-      buf_out[3] = 0;
+      buf_out[3] = WRITE_RG;
       buf_out[4] = TA_DATA(num);
       buf_out[5] = rtData;
-      buf_out[6] = 0xFFFF;
-      Block_out_in(minor_table[num], buf_out, NULL);
+      buf_out[6] = READ_RG;
+      buf_out[7] = TA_DATA(num);
+      buf_out[8] = 0xFFFF;
+      Block_out_in(minor_table[num], buf_out, buf_in);
     }
     else if (cmd == 0x7F3) //0x413
     {
 ////      DrvRtPokeTA(num, 0x3F, 0, rtData);
 //      outpw(TA_ADDR(num), (0x3F << 6) + 0);
 //      outpw(TA_DATA(num), rtData);
-      buf_out[0] = 0;
+      buf_out[0] = WRITE_RG;
       buf_out[1] = TA_ADDR(num);
       buf_out[2] = (0x3F << 6);
-      buf_out[3] = 0;
+      buf_out[3] = WRITE_RG;
       buf_out[4] = TA_DATA(num);
       buf_out[5] = rtData;
-      buf_out[6] = 0xFFFF;
-      Block_out_in(minor_table[num], buf_out, NULL);
+      buf_out[6] = READ_RG;
+      buf_out[7] = TA_DATA(num);
+      buf_out[8] = 0xFFFF;
+      Block_out_in(minor_table[num], buf_out, buf_in);
     }
     REST_IRQ_SMP();
     break;
-#ifdef MRTA
-  case __MRTA:
-// need to mantain an array of cmddatas for full compatibility
-    {
-    int realnum;
-    realnum = GET_RealNum;
-    GET_DIS_IRQ_SMP();
-    // page depend on std/brc (programmer should use std page)
-    outpw(MRTA_ADDR2(realnum), __hm400Page2_usb[num]);
-    if (cmd == 0x7F0) //0x410
-    {
-//      DrvRtPokeTA(realnum,(__hm400Page[num] >> 5) | 0x20, 0, rtData);
-      outpw(TA_ADDR(realnum), (((__hm400Page_usb[num] >> 5) | 0x20) << 6) + 0);
-      outpw(TA_DATA(realnum), rtData);
-    }
-    else if (cmd == 0x7F3) //0x413
-    {
-//      DrvRtPokeTA(realnum,(__hm400Page[num] >> 5) | 0x3F, 0, rtData);
-      outpw(TA_ADDR(realnum), (((__hm400Page_usb[num] >> 5) | 0x3F) << 6) + 0);
-      outpw(TA_DATA(realnum), rtData);
-    }
-    REST_IRQ_SMP();
-    break;
-    }
-#endif
   }
   return;
 }
@@ -5913,7 +4946,8 @@ void DrvRtWMode_usb(int __tmkNumber_usb, unsigned type, unsigned mode)
 {
   int num, realnum;
   unsigned sa;
-  u16 buf_out[6];
+  u16 buf_out[8];
+  u16 buf_in[4];
   IRQ_FLAGS;
 
   realnum = GET_RealNum;
@@ -5933,34 +4967,19 @@ void DrvRtWMode_usb(int __tmkNumber_usb, unsigned type, unsigned mode)
 //    data2 = inpw(TA_DATA(num));
 //    outpw(TA_ADDR(num), (AdrTab << 6) + sa);
 //    outpw(TA_DATA(num), (data2 & 0x7FFF) | ((mode << 4) & 0x8000));
-    buf_out[0] = 6;
+    buf_out[0] = MOD_MEM_AND;
     buf_out[1] = 1;
     buf_out[2] = (AdrTab << 6) + sa;
     buf_out[3] = 0x7FFF;
     buf_out[4] = (mode << 4) & 0x8000;
-    buf_out[5] = 0xFFFF;
-    Block_out_in(minor_table[realnum], buf_out, NULL);
+    buf_out[5] = READ_RG;
+    buf_out[6] = TA_BASE(realnum);
+    buf_out[7] = 0xFFFF;
+    Block_out_in(minor_table[realnum], buf_out, buf_in);
 
 //    sa = DrvRtPeekTA(num, AdrTab, sa);
     REST_IRQ_SMP();
     return;
-#ifdef MRTA
-  case __MRTA:
-    if (__FLAG_MODE_ON_usb[num])
-      return;
-    sa = (mode >> 5) & 0x3F;
-    GET_DIS_IRQ_SMP();
-    outpw(MRTA_ADDR2(realnum), 0);
-//    DrvRtPokeTA(realnum, __rtAddress[num], sa, (DrvRtPeekTA(realnum, __rtAddress[num], sa) & 0x7FFF) | ((mode << 4) & 0x8000));
-    outpw(TA_ADDR(realnum), (__rtAddress_usb[num] << 6) + sa);
-    data2 = inpw(TA_DATA(realnum));
-    outpw(TA_ADDR(realnum), (__rtAddress_usb[num] << 6) + sa);
-    outpw(TA_DATA(realnum), (data2 & 0x7FFF) | ((mode << 4) & 0x8000));
-//    sa = DrvRtPeekTA(num, __rtAddress[num], sa);
-//    outpw(MRTA_ADDR2(realnum), __hm400Page2[num]);
-    REST_IRQ_SMP();
-    return;
-#endif
   }
   return;
 }
@@ -6029,27 +5048,15 @@ unsigned DrvRtPeek_usb(int __tmkNumber_usb, unsigned type, unsigned pos)
 
 int ExamTmkRAM_usb(int num, unsigned type)
 {
-#if DRV_MAX_BASE > 255
   __mtMaxBase_usb[num] = 0;
-#endif
   switch (type)
   {
   case __TA:
     __tmkRAMSize_usb[num] = 64;
     __bcMaxBase_usb[num] = (1023 <= DRV_MAX_BASE) ? 1023 : DRV_MAX_BASE;
-#if DRV_MAX_BASE > 255
     __mtMaxBase_usb[num] = (511 <= DRV_MAX_BASE) ? 511 : DRV_MAX_BASE;
-#endif
     __rtMaxPage_usb[num] = 0;
     break;
-#ifdef MRTA
-  case __MRTA:
-    __tmkRAMSize_usb[num] = 256;
-    __bcMaxBase_usb[num] = 0;
-    __rtMaxPage_usb[num] = 0;
-    __mrtNRT[num] = 31;
-    break;
-#endif
   }
   return 0;
 }
@@ -6062,24 +5069,17 @@ void DrvInitAll_usb(void)
   {
     __tmkTimeOut_usb[i] = 0;
     __tmkTimerCtrl_usb[i] = 0;
+    __rtGap_usb[i] = 0;
     __tmkHWVer_usb[i] = 0;
 //      fTmkEventSet[i] = 0;
     __wInDelay_usb[i] = 1;
     __wOutDelay_usb[i] = 1;
-#if NRT > 0
-    __mrtMinRT[i] = 0;
-    __mrtNRT[i] = 1;
-    __dmrtRT[i] = 0L;
-    __dmrtBrc[i] = 0L;
-#endif //NRT
     __tmkRAMInWork_usb[i] = 0;
     __tmkRAMAddr_usb[i] = 0;
     __tmkStarted_usb[i] = 0;
     __bcBus_usb[i] = 0;
     __bcMaxBase_usb[i] = 0;
-#if DRV_MAX_BASE > 255
     __mtMaxBase_usb[i] = 0;
-#endif
   }
   for (i = 0; i < (NTMK + NRT); ++i)
   {
@@ -6099,10 +5099,6 @@ void DrvInitAll_usb(void)
     __rtMode_usb[i] = 0;
     __rtSubAddr_usb[i] = 0;
     __hm400Page_usb[i] = 0;
-#ifdef MRTA
-    __hm400Page0_usb[i] = 0;
-    __hm400Page2_usb[i] = 0;
-#endif
     __rtEnableOnAddr_usb[i] = 1;
     __FLAG_MODE_ON_usb[i] = 0;
   }
@@ -6116,37 +5112,67 @@ void DrvInitAll_usb(void)
 
 void DrvInitTmk_usb(int num, unsigned type)
 {
-  u16 buf_out[7];
-#ifdef MRTA
+  u16 buf_out[48];
+  u16 buf_in[64];
   unsigned i;
-#endif
-#ifdef QNX4VME
-  unsigned led;
-#endif //def QNX4VME
 
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-//    break;
-    for (i = 0; i <= 31; ++i)
-      outpw(MRTA_SW(num), i << 11);
-#endif
   case __TA:
     GET_DIS_IRQ_SMP();
 //    outpw(TA_RESET(num), 0);
     buf_out[0] = 0;
     buf_out[1] = TA_RESET(num);
     buf_out[2] = 0;
-#if NRT > 0
-    __mrtLastBrcTxRT[num] = 0;
-#endif
 //    outpw(TA_MODE1(num), TA_FIFO_RESET);
     buf_out[3] = 0;
     buf_out[4] = TA_MODE1(num);
     buf_out[5] = TA_FIFO_RESET;
-    buf_out[6] = 0xFFFF;
-    Block_out_in(minor_table[num], buf_out, NULL);
+    buf_out[6] = 0;
+    buf_out[7] = TA_MODE1(num);
+    buf_out[8] = 0;//TA_FIFO_RESET
+
+    buf_out[9] = 1;
+    buf_out[10] = TA_IRQ(num);
+    buf_out[11] = 1;
+    buf_out[12] = TA_IRQ(num);
+    buf_out[13] = 1;
+    buf_out[14] = TA_IRQ(num);
+    buf_out[15] = 1;
+    buf_out[16] = TA_IRQ(num);
+    buf_out[17] = 1;
+    buf_out[18] = TA_IRQ(num);
+    buf_out[19] = 1;
+    buf_out[20] = TA_IRQ(num);
+    buf_out[21] = 1;
+    buf_out[22] = TA_IRQ(num);
+    buf_out[23] = 1;
+    buf_out[24] = TA_IRQ(num);
+    buf_out[25] = 1;
+    buf_out[26] = TA_IRQ(num);
+    buf_out[27] = 1;
+    buf_out[28] = TA_IRQ(num);
+    buf_out[29] = 1;
+    buf_out[30] = TA_IRQ(num);
+    buf_out[31] = 1;
+    buf_out[32] = TA_IRQ(num);
+    buf_out[33] = 1;
+    buf_out[34] = TA_IRQ(num);
+    buf_out[35] = 1;
+    buf_out[36] = TA_IRQ(num);
+    buf_out[37] = 1;
+    buf_out[38] = TA_IRQ(num);
+    buf_out[39] = 1;
+    buf_out[40] = TA_IRQ(num);
+    buf_out[41] = 0xFFFF;
+
+    Block_out_in(minor_table[num], buf_out, buf_in);
+
+    for (i = 2; i < 48; i+=3)
+    {
+//      Register_input_bl(__tmkNumber, port, &data_in);
+      __tmkHWVer_usb[num] |= ((buf_in[i] & 0x1000) >> 12) << ((i-2)/3);
+    }
 //    outpw(TA_MODE1(num), 0);
     REST_IRQ_SMP();
 //    port = TA_IRQ(num);  //because of TA1-USB irq polling
@@ -6177,9 +5203,6 @@ int FARFN tmkconfig_usb(int hTMK, U16 wType, U16 PortsAddr1, U16 PortsAddr2, U08
   int num;
   unsigned type;
   int res;
-#if NRT > 0
-  unsigned irt, nrt;
-#endif
 
 //  spin_lock(&tmkSpinLock);
   if (__tmkFirstTime_usb)
@@ -6218,9 +5241,6 @@ int FARFN tmkconfig_usb(int hTMK, U16 wType, U16 PortsAddr1, U16 PortsAddr2, U08
     return res;
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-#endif
   case __TA:
     __rtControls1_usb[num] = TA_HBIT_MODE + TA_BRCST_MODE;
     __FLAG_MODE_ON_usb[num] = 0;
@@ -6228,45 +5248,6 @@ int FARFN tmkconfig_usb(int hTMK, U16 wType, U16 PortsAddr1, U16 PortsAddr2, U08
     break;
   }
   __amrtNumber_usb[num] = num;
-#if NRT > 0
-  switch (type)
-  {
-#ifdef MRTA
-  case __MRTA:
-#endif
-#if defined(MRTX) || defined(MRTA)
-    nrt = __mrtNRT[num];
-    irt = __mrtMinRT[num];
-    if (irt == 0)
-    {
-      irt = __tmkMaxNumber_usb;
-      __tmkMaxNumber_usb += nrt;
-      while (__tmkMaxNumber_usb >= (NTMK + NRT))
-      {
-        --__tmkMaxNumber_usb;
-        --__mrtNRT[num];
-        --nrt;
-      }
-      if (nrt <= 0)
-        return USER_ERROR_R(TMK_BAD_NUMBER);
-      ++irt;
-      __mrtMinRT[num] = irt;
-    }
-    __tmkNumber = irt;
-    do
-    {
-      __amrtNumber_usb[irt] = num;
-      __tmkDrvType_usb[irt] = type;
-      __rtDisableMask_usb[irt] = __RT_DIS_MASK_usb[type];
-      __rtBRCMask_usb[irt] = __RT_BRC_MASK_usb[type];
-      __rtEnableOnAddr_usb[irt] = 1;
-      ++irt;
-    }
-    while (--nrt != 0);
-    break;
-#endif
-  }
-#endif
 //  Irq2;
   return 0;
 }
@@ -6276,9 +5257,6 @@ int FARFN tmkdone_usb(int hTMK)
   int num;
   unsigned type;
   int ntmk;
-#if NRT > 0
-  int irt, nrt;
-#endif
 
   num = hTMK;
   if (num != ALL_TMKS)
@@ -6299,65 +5277,12 @@ int FARFN tmkdone_usb(int hTMK)
     __rtDisableMask_usb[num] = __RT_DIS_MASK_usb[type];
     __rtBRCMask_usb[num] = __RT_BRC_MASK_usb[type];
     __rtEnableOnAddr_usb[num] = 1;
-#if NRT > 0
-    switch (type)
-    {
-#ifdef MRTA
-    case __MRTA:
-      __rtControls1_usb[num] = TA_HBIT_MODE+TA_BRCST_MODE;
-      __FLAG_MODE_ON_usb[num] = 0;
-      irt = __mrtMinRT[num];
-      nrt = __mrtNRT[num];
-      while (nrt > 0)
-      {
-//;        __amrtNumber2[irt] = 0xFFFF;
-        if (__rtAddress_usb[irt] > 0 && __rtAddress_usb[irt] < 31)
-        {
-          __dmrtRT[irt] &= ~(1L << __rtAddress_usb[irt]);
-          __dmrtBrc[irt] &= ~(1L << __rtAddress_usb[irt]);
-        }
-        __rtAddress_usb[irt] = 0x00FF;
-        __tmkDrvType_usb[irt] = 0xFFFF;
-        __rtDisableMask_usb[irt] = __RT_DIS_MASK_usb[type];
-        __rtBRCMask_usb[irt] = __RT_BRC_MASK_usb[type];
-        __rtEnableOnAddr_usb[irt] = 1;
-        ++irt;
-        --nrt;
-      }
-      break;
-#endif
-    }
-#endif
   }
   while (++num < ntmk);
   return 0;
 }
 
-#ifdef MRTA
-unsigned long DIRQLTmkSave_usb(int hTMK)
-{
-  if (__tmkDrvType_usb[hTMK] == __TA)
-    return (unsigned long)inpw(__tmkPortsAddr1_usb[hTMK] + TMK_AddrPort);
-  else if (__tmkDrvType_usb[hTMK] == __MRTA)
-    return (((unsigned long)inpw(MRTA_ADDR2(hTMK)) << 16) + (unsigned long)inpw(TA_ADDR(hTMK)));
-  else
-    return 0L;
-}
-
-void DIRQLTmkRestore_usb(int hTMK, unsigned long Saved)
-{
-
-  if (__tmkDrvType_usb[hTMK] == __TA)
-    outpw(__tmkPortsAddr1_usb[hTMK] + TMK_AddrPort, Saved);
-  else if (__tmkDrvType_usb[hTMK] == __MRTA)
-  {
-    outpw(MRTA_ADDR2(hTMK), (unsigned)(Saved >> 16));
-    outpw(TA_ADDR(hTMK), (unsigned)Saved);
-  }
-  return;
-}
-#else
-unsigned DIRQLTmkSave_usb(int hTMK)
+/*unsigned DIRQLTmkSave_usb(int hTMK)
 {
   u16 buf_out[3];
   u16 buf_in[4];
@@ -6386,8 +5311,7 @@ void DIRQLTmkRestore_usb(int hTMK, unsigned Saved)
 //    outpw(__tmkPortsAddr1[hTMK] + TMK_AddrPort, Saved);
   }
   return;
-}
-#endif //def MRTA
+}*/
 
 /*void DpcIExcBC(int hTMK, void *pEvData)
 {
@@ -6507,10 +5431,6 @@ int FARFN mbcpreparex_usb(
   __mbcBase_usb[mbcId][i] = base;
   switch (type)
   {
-#ifdef MRTA
-  case __MRTA:
-    return USER_ERROR(BC_BAD_FUNC);
-#endif
   case __TA:
     {
       unsigned ContrW = 0x1D1F;
@@ -6522,11 +5442,7 @@ int FARFN mbcpreparex_usb(
         ContrW |= 0x0080;
       if (code & CX_CONT)
         ContrW |= 0x2000;
-#if DRV_MAX_BASE < 256
-      code1 = __bcLinkWN[realnum][base];
-#else
       code1 = __bcLinkCCN_usb[realnum][base];
-#endif
       if (code1 & CX_SIG)
         ContrW |= 0x8000;
 
@@ -6611,10 +5527,6 @@ int FARFN mbcstartx_usb(U16 mbcId)
     buf_out[6] = 0xFFFF;
     switch (type)
     {
-#ifdef MRTA
-    case __MRTA:
-      return USER_ERROR(BC_BAD_FUNC);
-#endif
     case __TA:
       if (__tmkStarted_usb[realnum])
       {

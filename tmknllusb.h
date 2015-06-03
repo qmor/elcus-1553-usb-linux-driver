@@ -59,6 +59,10 @@ typedef unsigned long U32;
 #define MBC_ALLOC_FAIL 0xFFFF
 #endif
 
+#define GET_RT_GAP 0xFFFF
+#define RT_GAP_DEFAULT 0
+#define RT_GAP_OPT1 1
+
 #define GET_TIMEOUT 0xFFFF
 
 #define SWTIMER_OFF   0x0000

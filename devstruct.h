@@ -44,5 +44,6 @@ struct tmk1553busb
   char                   ResetEP6mt;
   char                   ResetEP6int;
   volatile char          event;
+  int                    SerialNumber;
 };
 #endif

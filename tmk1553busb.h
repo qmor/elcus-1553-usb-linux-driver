@@ -2,12 +2,12 @@
 #ifndef __TMK1553BUSB__
 #define __TMK1553BUSB__
 
-#define DRIVER_VERSION "v1.7"
+#define DRIVER_VERSION "v1.8"
 #define DRIVER_AUTHOR "Elcus"
 #define DRIVER_DESC "Driver for ELCUS (http://www.elcus.ru) MIL-STD-1553B USB devices"
 
 #define TMKUSB_VER_HI 0x01
-#define TMKUSB_VER_LO 0x07
+#define TMKUSB_VER_LO 0x08
 
 #define TMKUSB_FWVER_MIN 0x0105
 
@@ -45,6 +45,14 @@ typedef struct
   u16 wMode;
   u16 awEvData[3];
 } TListEvD, *pTListEvD;
+
+typedef struct
+{
+  struct list_head ProcListEntry;
+  pid_t hProc;
+  int openCnt;
+  int waitFlag;
+} TListProc;
 
 /*
  * Ioctl definitions

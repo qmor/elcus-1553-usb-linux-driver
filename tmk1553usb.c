@@ -1,5 +1,5 @@
 /*
- * tmk1553busb.c -- the tmk1553busb v1.07.1 usb kernel module.
+ * tmk1553busb.c -- the tmk1553busb v1.08 usb kernel module.
  * (c) ELCUS, 2008.
  */
 #ifndef __KERNEL__
@@ -8,12 +8,11 @@
 #ifndef MODULE
 #  define MODULE
 #endif
-
 #include "config.h"
-#include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)
+#ifndef TMK1553B_NOCONFIGH
 #include <linux/config.h>
-#endif
+#endif 
+#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -27,15 +26,7 @@
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/wait.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)
-#include <linux/smp_lock.h>
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0)
-#include <linux/semaphore.h>
-#include <linux/kthread.h>
-#endif
-
+#include <linux/smp.h>
 #ifdef CONFIG_DEVFS_FS
 #include <linux/devfs_fs_kernel.h>
 #endif
@@ -47,14 +38,22 @@
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
 #error Unsupported Kernel Version!
 #endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0)
+#define _LINUX_3_0_
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
 #define _LINUX_2_6_
-MODULE_LICENSE("GPL");
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
 #define _LINUX_2_4_
 #endif
+#if defined(_LINUX_3_0_) || defined(_LINUX_2_6_)
+MODULE_LICENSE("GPL");
+#endif
 #ifdef CONFIG_64BIT
 #define __64BIT__
+#endif
+
+#ifdef _LINUX_3_0_
+#include<linux/kthread.h>
 #endif
 
 #include "tmk1553busb.h"
@@ -217,6 +216,7 @@ u32 TMK_mbcstartx(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf
 u32 TMK_mbcalloc(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf);
 u32 TMK_mbcfree(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf);
 
+u32 TMK_tmkwaiteventsflag(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf);
 u32 TMK_tmkwaiteventsm(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf);
 
 //u32 TMK_bcputblk64(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf);
@@ -227,6 +227,8 @@ u32 TMK_tmkwaiteventsm(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * 
 
 //u32 TMK_rtgetflags64(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf);
 //u32 TMK_rtputflags64(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf);
+
+u32 TMK_tmkreadsn(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf);
 
 u32 (*TMK_Procs[])(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf) = {
         TMK_tmkconfig,
@@ -365,8 +367,21 @@ u32 (*TMK_Procs[])(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBu
         TMK_MT_Start,
         TMK_MT_GetMessage,
         TMK_MT_Stop,
+        TMK_tmkwaiteventsflag, //115
 
-        TMK_tmkwaiteventsm
+        TMK_tmkwaiteventsm,
+
+        TMK_tmkwaiteventsflag, //117
+        TMK_tmkwaiteventsflag,
+        TMK_tmkwaiteventsflag,
+        TMK_tmkwaiteventsflag,
+        TMK_tmkwaiteventsflag,
+        TMK_tmkwaiteventsflag,
+        TMK_tmkwaiteventsflag,
+        TMK_tmkwaiteventsflag,
+        TMK_tmkwaiteventsflag,
+        TMK_tmkwaiteventsflag,
+        TMK_tmkreadsn //127
 
 //        TMK_bcputblk64,
 //        TMK_bcgetblk64,
@@ -384,7 +399,11 @@ u32 (*TMK_Procs[])(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBu
 #define HIWORD(l)           ((u16)(((u32)(l) >> 16) & 0xFFFF))
 
 /* local function prototypes */
-static long tmk1553busb_ioctl (/*struct inode *inode,*/ struct file *file, unsigned int cmd, unsigned long arg);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,16)
+static long tmk1553busb_uioctl (struct file *filp, unsigned int cmd, unsigned long arg);
+#else
+static int tmk1553busb_ioctl (struct inode *inode, struct file *filp, unsigned int cmd, unsigned long arg);
+#endif
 static int tmk1553busb_open (struct inode *inode, struct file *file);
 static int tmk1553busb_release (struct inode *inode, struct file *file);
 
@@ -392,28 +411,39 @@ static int tmk1553busb_release (struct inode *inode, struct file *file);
 static void * tmk1553busb_probe (struct usb_device *dev, unsigned int ifnum, const struct usb_device_id *id);
 static void tmk1553busb_disconnect (struct usb_device *dev, void *ptr);
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
 static int tmk1553busb_probe(struct usb_interface *interface, const struct usb_device_id *id);
 static void tmk1553busb_disconnect(struct usb_interface *interface);
 #endif
 
 void tmk1553busb_delete (struct tmk1553busb * dev);
 void kthread_launcher(void *data);
+#ifdef _LINUX_3_0_
+int int_thread(void * dev);
+#else
 void int_thread(struct tmk1553busb * dev);
+#endif
 
 /* array of pointers to our devices that are currently connected */
 struct tmk1553busb * minor_table[MAX_DEVICES];
 char intth_run[MAX_DEVICES];
+struct list_head hlProc;
 
 /* semaphores to protect the minor_table structure */
 #ifdef SPIN_LOCK_BLOCKING
-spinlock_t __device_lock[MAX_DEVICES];
+spinlock_t dev_lock[MAX_DEVICES];
+spinlock_t list_lock;
 #define LOCK_DEVICE(lock) spin_lock_irq(lock)
 #define UNLOCK_DEVICE(lock) spin_unlock_irq(lock)
+#define LOCK_LIST() spin_lock_irq(&list_lock)
+#define UNLOCK_LIST() spin_unlock_irq(&list_lock)
 #else
-struct semaphore __device_lock[MAX_DEVICES];
+struct semaphore dev_lock[MAX_DEVICES];
+struct semaphore list_lock;
 #define LOCK_DEVICE(lock) down(lock)
 #define UNLOCK_DEVICE(lock) up(lock)
+#define LOCK_LIST() down(&list_lock)
+#define UNLOCK_LIST() up(&list_lock)
 #endif
 
 #ifdef SPIN_LOCK_IRQ_BLOCKING
@@ -451,6 +481,15 @@ u32 MonitorHwBufSize[MAX_DEVICES];
 u32 MonitorHwBufCount[MAX_DEVICES];
 u8 MonitorHwTimer[MAX_DEVICES];
 
+static int usbminor = TMK1553BUSB_MINOR_BASE;
+
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,3)
+module_param(usbminor, int, 0);
+MODULE_PARM_DESC(usbminor, "Minor base number");
+#else
+MODULE_PARM(usbminor,"i");
+#endif
+
 /*
  * File operations needed when we register this driver.
  * This assumes that this driver NEEDS file operations,
@@ -484,13 +523,16 @@ static struct file_operations tmk1553busb_fops =
 #ifdef MY_OWNER
   owner:    THIS_MODULE,
 #endif
-
-  unlocked_ioctl:    tmk1553busb_ioctl,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,16)
+  unlocked_ioctl:      tmk1553busb_uioctl,
+#else
+  ioctl:    tmk1553busb_ioctl,
+#endif
   open:     tmk1553busb_open,
   release:  tmk1553busb_release,
 };
 
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
 static struct usb_class_driver tmk1553busb_class = {
   name:         "tmk1553busb%d",
   fops:	        &tmk1553busb_fops,
@@ -519,7 +561,7 @@ inline void tmk1553busb_delete(struct tmk1553busb * dev)
   if(MonitorHwBuf[dev->minor])
     kfree(MonitorHwBuf[dev->minor]);
   minor_table[dev->minor] = NULL;
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
   usb_deregister_dev(dev->interface, &tmk1553busb_class);
 #endif
   kfree (dev);
@@ -531,11 +573,18 @@ inline void tmk1553busb_delete(struct tmk1553busb * dev)
 static int tmk1553busb_open (struct inode *inode, struct file *file)
 {
   struct tmk1553busb * dev = NULL;
-  int subminor = MINOR (inode->i_rdev) - TMK1553BUSB_MINOR_BASE;
+  int subminor;
+  TListProc *hlnProc;
+  TListProc *hlnProc1;
 
+  if(MINOR (inode->i_rdev) >= usbminor)
+    subminor = MINOR (inode->i_rdev) - usbminor;
+  else
+    subminor = MINOR (inode->i_rdev);
+  
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: Enter to tmk1553busb_open minor %d procID: %d\n",
-         MINOR (inode->i_rdev),
+         subminor,
          current->pid);
 #endif
 
@@ -553,16 +602,21 @@ static int tmk1553busb_open (struct inode *inode, struct file *file)
   MOD_INC_USE_COUNT;
 #endif
 
+  hlnProc = kmalloc(sizeof(TListProc), GFP_KERNEL);
+  if(hlnProc == NULL)
+    return -ENODEV;
+
   /* lock our device and get our local data for this minor */
-  LOCK_DEVICE(&__device_lock[subminor]);
+  LOCK_DEVICE(&dev_lock[subminor]);
 
   dev = minor_table[subminor];
   if (dev == NULL) //device was removed
   {
-    UNLOCK_DEVICE(&__device_lock[subminor]);
+    UNLOCK_DEVICE(&dev_lock[subminor]);
 #ifndef MY_OWNER
     MOD_DEC_USE_COUNT;
 #endif
+    kfree(hlnProc);
     return -ENODEV;
   }
 
@@ -573,8 +627,29 @@ static int tmk1553busb_open (struct inode *inode, struct file *file)
   file->private_data = dev;
 
   /* unlock this device */
-  UNLOCK_DEVICE(&__device_lock[subminor]);
+  UNLOCK_DEVICE(&dev_lock[subminor]);
 
+  LOCK_LIST();
+  for(hlnProc1 = (TListProc*)(hlProc.next);
+      hlnProc1 != (TListProc*)(&hlProc);
+      hlnProc1 = (TListProc*)(hlnProc1->ProcListEntry.next)
+      )
+  {
+    if (hlnProc1->hProc == current->pid)
+    {
+      hlnProc1->openCnt++;
+      kfree(hlnProc);
+      goto exit_open;
+    }
+  }
+
+  hlnProc->hProc = current->pid;
+  hlnProc->openCnt = 1;
+  hlnProc->waitFlag = 0;
+  list_add_tail(&hlnProc->ProcListEntry, &hlProc);
+
+exit_open:
+  UNLOCK_LIST();
   return 0;
 }
 
@@ -584,11 +659,18 @@ static int tmk1553busb_open (struct inode *inode, struct file *file)
 static int tmk1553busb_release (struct inode *inode, struct file *file)
 {
   struct tmk1553busb * dev = NULL;
-  int subminor = MINOR (inode->i_rdev) - TMK1553BUSB_MINOR_BASE;
+  int subminor;
+  TListProc *hlnProc;
+  pid_t hProc;
 
+  if(MINOR (inode->i_rdev) >= usbminor)
+    subminor = MINOR (inode->i_rdev) - usbminor;
+  else
+    subminor = MINOR (inode->i_rdev);
+  
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: Enter to tmk1553busb_release minor %d\n",
-         MINOR (inode->i_rdev));
+         subminor);
 #endif
 
   if ((subminor < 0) || (subminor >= MAX_DEVICES))
@@ -596,12 +678,31 @@ static int tmk1553busb_release (struct inode *inode, struct file *file)
     return -ENODEV;
   }
 
-  LOCK_DEVICE(&__device_lock[subminor]);
+  hProc = current->pid;
+  LOCK_LIST();
+  for (hlnProc = (TListProc*)(hlProc.next);
+       hlnProc != (TListProc*)(&hlProc);
+       hlnProc = (TListProc*)(hlnProc->ProcListEntry.next)
+      )
+  {
+    if (hlnProc->hProc != hProc)
+      continue;
+    hlnProc->openCnt--;
+    if(hlnProc->openCnt <= 0)
+    {
+      list_del((struct list_head *)hlnProc);
+      kfree(hlnProc);
+    }
+    break;
+  }
+  UNLOCK_LIST();
+
+  LOCK_DEVICE(&dev_lock[subminor]);
 //  dev = (struct tmk1553busb *)file->private_data;
   dev = minor_table[subminor];
   if (dev == NULL)
   {
-    UNLOCK_DEVICE(&__device_lock[subminor]);
+    UNLOCK_DEVICE(&dev_lock[subminor]);
     return -ENODEV;
   }
 
@@ -636,7 +737,7 @@ exit1:
     dev->curproc = 0;
   }
 exit2:
-  UNLOCK_DEVICE(&__device_lock[subminor]);
+  UNLOCK_DEVICE(&dev_lock[subminor]);
 #ifndef MY_OWNER
   MOD_DEC_USE_COUNT;
 #endif
@@ -646,12 +747,15 @@ exit2:
 /*
  *  tmk1553busb_ioctl
  */
-static long tmk1553busb_ioctl (/*struct inode *inode,*/ struct file *file, unsigned int cmd, unsigned long arg)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,16)
+static long tmk1553busb_uioctl (struct file *filp, unsigned int cmd, unsigned long arg)
+#else
+static int tmk1553busb_ioctl (struct inode *inode, struct file *filp, unsigned int cmd, unsigned long arg)
+#endif
 {
   struct tmk1553busb * dev;
-  struct inode *inode = file->f_inode;
   int err = 0;
-  int subminor = MINOR (inode->i_rdev) - TMK1553BUSB_MINOR_BASE;
+  int subminor;
   u32 dwService;
   u32 dwRetVal = 0;
   u16 awBuf[64];
@@ -659,9 +763,18 @@ static long tmk1553busb_ioctl (/*struct inode *inode,*/ struct file *file, unsig
   u16 awOut[6];
   u16 * ptr = NULL;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,16)
+  subminor = ((struct tmk1553busb *)filp->private_data)->minor;
+#else
+  if(MINOR (inode->i_rdev) >= usbminor)
+    subminor = MINOR (inode->i_rdev) - usbminor;
+  else
+    subminor = MINOR (inode->i_rdev);
+#endif
+
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: Enter to tmk1553busb_ioctl minor %d cmd %d\n",
-         MINOR (inode->i_rdev), _IOC_NR(cmd));
+         subminor, _IOC_NR(cmd));
 #endif
   if ((subminor < 0) || (subminor >= MAX_DEVICES))
   {
@@ -744,18 +857,18 @@ static long tmk1553busb_ioctl (/*struct inode *inode,*/ struct file *file, unsig
     break;
   }
 
-  LOCK_DEVICE(&__device_lock[subminor]);
+  LOCK_DEVICE(&dev_lock[subminor]);
   dev = minor_table[subminor];
 //  dev = (struct tmk1553busb *)file->private_data;
   if (dev == NULL)
   {
-    UNLOCK_DEVICE(&__device_lock[subminor]);
+    UNLOCK_DEVICE(&dev_lock[subminor]);
     return -ENODEV;
   }
   /* verify that the device wasn't unplugged */
   if (dev->udev == NULL)
   {
-    UNLOCK_DEVICE(&__device_lock[subminor]);
+    UNLOCK_DEVICE(&dev_lock[subminor]);
     return -ENODEV;
   }
 
@@ -764,7 +877,7 @@ static long tmk1553busb_ioctl (/*struct inode *inode,*/ struct file *file, unsig
   err = tmkError_usb[dev->minor];
 
   /* unlock the device */
-  UNLOCK_DEVICE(&__device_lock[subminor]);
+  UNLOCK_DEVICE(&dev_lock[subminor]);
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: ioctl: error %d\n",err);
 #endif
@@ -848,7 +961,7 @@ static long tmk1553busb_ioctl (/*struct inode *inode,*/ struct file *file, unsig
 #ifdef _LINUX_2_4_
 static void * tmk1553busb_probe(struct usb_device *udev, unsigned int ifnum, const struct usb_device_id *id)
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
 static int tmk1553busb_probe(struct usb_interface *interface, const struct usb_device_id *id)
 #endif
 {
@@ -858,7 +971,7 @@ static int tmk1553busb_probe(struct usb_interface *interface, const struct usb_d
   struct usb_interface_descriptor * iface_desc;
   struct tq_struct tq;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
 struct usb_device * udev;
 struct usb_host_interface * iface_desc;
 #ifdef TMK1553BUSB_DEBUG
@@ -872,6 +985,7 @@ struct usb_endpoint_descriptor * endpoint;
   int ret;
   char speed[2];
   __u8 length;
+  u8 aSerialNumber[8];
 #ifdef CONFIG_DEVFS_FS
   char name[20];
 #endif
@@ -879,7 +993,7 @@ struct usb_endpoint_descriptor * endpoint;
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: Enter to tmk1553busb_probe %d\n", current->pid);
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
   udev = usb_get_dev(interface_to_usbdev(interface));
 #endif
   /* See if the device offered us matches what we can accept */
@@ -889,7 +1003,7 @@ struct usb_endpoint_descriptor * endpoint;
 #ifdef _LINUX_2_4_
     return NULL;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
     return -EPERM;
 #endif
   }
@@ -904,7 +1018,7 @@ struct usb_endpoint_descriptor * endpoint;
 #ifdef _LINUX_2_4_
     return NULL;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
     return -ENOMEM;
 #endif
   }
@@ -927,7 +1041,7 @@ struct usb_endpoint_descriptor * endpoint;
 #ifdef _LINUX_2_4_
     return NULL;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
     return -EPERM;
 #endif
   }
@@ -942,7 +1056,7 @@ struct usb_endpoint_descriptor * endpoint;
 #ifdef _LINUX_2_4_
     return NULL;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
     return -EPERM;
 #endif
   }
@@ -960,7 +1074,7 @@ struct usb_endpoint_descriptor * endpoint;
 #ifdef _LINUX_2_4_
     return NULL;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
     return -ENOMEM;
 #endif
   }
@@ -983,7 +1097,7 @@ struct usb_endpoint_descriptor * endpoint;
 #ifdef _LINUX_2_4_
     return NULL;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
     return -EPERM;
 #endif
   }
@@ -998,7 +1112,7 @@ struct usb_endpoint_descriptor * endpoint;
 #ifdef _LINUX_2_4_
     return NULL;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
     return -EPERM;
 #endif
   }
@@ -1037,7 +1151,7 @@ nextdev:
 #ifdef _LINUX_2_4_
     return NULL;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
     return -EPERM;
 #endif
   }
@@ -1045,7 +1159,7 @@ nextdev:
     devtype++;
 
   /* allocate memory for our device state and intialize it */
-  dev = kmalloc (sizeof(struct tmk1553busb), GFP_KERNEL);
+  dev = kmalloc (sizeof(*dev), GFP_KERNEL);
   if (dev == NULL)
   {
 #ifdef TMK1553BUSB_DEBUG
@@ -1055,7 +1169,7 @@ nextdev:
 #ifdef _LINUX_2_4_
     return NULL;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
     return -ENOMEM;
 #endif
   }
@@ -1065,11 +1179,11 @@ nextdev:
 #ifdef _LINUX_2_4_
   for (minor = 0; minor < MAX_DEVICES; ++minor)
   {
-    LOCK_DEVICE(&__device_lock[minor]);
+    LOCK_DEVICE(&dev_lock[minor]);
     if (minor_table[minor] == NULL)
       break;//found free minor
     else
-      UNLOCK_DEVICE(&__device_lock[minor]);
+      UNLOCK_DEVICE(&dev_lock[minor]);
   }
 
   if (minor >= MAX_DEVICES)
@@ -1081,8 +1195,9 @@ nextdev:
     return NULL;
   }
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
   usb_set_intfdata(interface, dev);
+  tmk1553busb_class.minor_base = usbminor;
   if (usb_register_dev(interface, &tmk1553busb_class)) 
   {
     /* something prevented us from registering this driver */
@@ -1093,8 +1208,11 @@ nextdev:
     kfree(dev);
     return -EPERM;
   }
-  minor = interface->minor - TMK1553BUSB_MINOR_BASE;
-  if(minor >= MAX_DEVICES)
+  if((interface->minor) >= usbminor)
+    minor = interface->minor - usbminor;
+  else
+    minor = interface->minor;
+  if((minor >= MAX_DEVICES) || (minor < 0))
   {
 #ifdef TMK1553BUSB_DEBUG
     printk(KERN_INFO "tmk1553busb: Too many devices plugged in\n");
@@ -1135,7 +1253,7 @@ nextdev:
 #ifdef _LINUX_2_4_
   iface_desc = &interface->altsetting[0];
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
   iface_desc = interface->cur_altsetting;
 #endif
 
@@ -1156,7 +1274,7 @@ nextdev:
                          iface_desc->endpoint[i].wMaxPacketSize);
       }
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
       printk(KERN_INFO "tmk1553busb: Config info: Device #%d NumEP %d\n",
                        minor,
                        iface_desc->desc.bNumEndpoints);
@@ -1184,7 +1302,7 @@ nextdev:
       dev->ep6_maxsize = iface_desc->endpoint[2].wMaxPacketSize;
       dev->ep8_maxsize = iface_desc->endpoint[3].wMaxPacketSize;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
       if(iface_desc->desc.bNumEndpoints != 4)
       {
         usb_set_intfdata(interface, NULL);
@@ -1229,12 +1347,41 @@ nextdev:
   if(ret < 0 || ((u16)(dev->fwver[0]) << 8) + (u16)(dev->fwver[1]) < TMKUSB_FWVER_MIN)
   {
     printk(KERN_INFO "tmk1553busb: unsupported firmware version!\n");
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
     usb_set_intfdata(interface, NULL);
     usb_deregister_dev(interface, &tmk1553busb_class);
 #endif
     goto error;
   }
+
+  /* read serial number */
+  ret = usb_control_msg(dev->udev,
+                        usb_rcvctrlpipe(dev->udev, 0),
+                        0xb4,
+                        USB_DIR_IN,
+                        0,
+                        0,
+                        aSerialNumber,
+                        8,
+                        5*HZ);
+  if(ret < 0)
+  {
+    printk(KERN_INFO "tmk1553busb: serial number read error!\n");
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
+    usb_set_intfdata(interface, NULL);
+    usb_deregister_dev(interface, &tmk1553busb_class);
+#endif
+    goto error;
+  }
+
+  dev->SerialNumber = aSerialNumber[7] - '0';
+  dev->SerialNumber += (aSerialNumber[6] - '0') * 10;
+  dev->SerialNumber += (aSerialNumber[5] - '0') * 100;
+  dev->SerialNumber += (aSerialNumber[4] - '0') * 1000;
+  dev->SerialNumber += (aSerialNumber[3] - '0') * 10000;
+  dev->SerialNumber += (aSerialNumber[2] - '0') * 100000;
+  dev->SerialNumber += (aSerialNumber[1] - '0') * 1000000;
+  dev->SerialNumber += (aSerialNumber[0] - '0') * 10000000;
 
   /* set up the device speed */
   ret = usb_control_msg(dev->udev,
@@ -1251,7 +1398,11 @@ nextdev:
 #endif
 
 //start thread
-  sema_init(&dev->startstopth_sem,0);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,16)
+  sema_init(&dev->startstopth_sem, 0);
+#else
+  init_MUTEX_LOCKED(&dev->startstopth_sem);
+#endif
 
 #ifdef _LINUX_2_4_
   tq.sync = 0;
@@ -1270,13 +1421,13 @@ nextdev:
   }
 #endif
 #ifdef _LINUX_2_6_
-  // kernel_thread((int (*)(void *))kthread_launcher, (void *)dev,
-  //               CLONE_FILES | CLONE_FS |
-  //               CLONE_SIGHAND);
-
-   kthread_run((int (*)(void *))kthread_launcher, (void *)dev, "Elcus_1553usb_thread");
+  kernel_thread((int (*)(void *))kthread_launcher, (void *)dev,
+                CLONE_FILES | CLONE_FS |
+                CLONE_SIGHAND);
 #endif
-
+#ifdef _LINUX_3_0_
+  kthread_run(&int_thread,(void *)dev,"tmk1553busb_int_thread");
+#endif
   down(&dev->startstopth_sem);
 
 #ifdef CONFIG_DEVFS_FS
@@ -1286,7 +1437,7 @@ nextdev:
                               name,
                               DEVFS_FL_DEFAULT,
                               USB_MAJOR,
-                              TMK1553BUSB_MINOR_BASE + dev->minor,
+                              usbminor + dev->minor,
                               S_IFCHR | S_IRUSR | S_IWUSR |
                               S_IRGRP | S_IWGRP | S_IROTH,
                               &tmk1553busb_fops,
@@ -1298,16 +1449,16 @@ nextdev:
                      major %d minor %d\n",
                      dev->minor,
                      USB_MAJOR,
-                     TMK1553BUSB_MINOR_BASE + dev->minor);
+                     usbminor + dev->minor);
   else
     printk(KERN_INFO "tmk1553busb: devfs_register error. major %d minor %d\n",
                      USB_MAJOR,
-                     TMK1553BUSB_MINOR_BASE + dev->minor);//check in devfs
+                     usbminor + dev->minor);//check in devfs
 #else
     printk(KERN_INFO "tmk1553busb: device #%d connected: major %d minor %d\n",
                      dev->minor,
                      USB_MAJOR,
-                     TMK1553BUSB_MINOR_BASE + dev->minor);
+                     usbminor + dev->minor);
 #endif  //devfs
   goto exit;
 
@@ -1318,11 +1469,11 @@ error:
   dev = NULL;
 
 exit:
-  UNLOCK_DEVICE(&__device_lock[minor]);
+  UNLOCK_DEVICE(&dev_lock[minor]);
 #ifdef _LINUX_2_4_
   return dev;
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
   if(dev == NULL)
     return -EPERM;
   else
@@ -1334,23 +1485,28 @@ exit:
  * kthread_launcher
  */
 
+#ifndef _LINUX_3_0_
 void kthread_launcher(void *data)
 {
   struct tmk1553busb * arg = data;
 #ifdef _LINUX_2_6_
-  //daemonize("thread_launcher", 0);
+  daemonize("thread_launcher", 0);
 #endif
-  // kthread_run((int (*)(void *))kthread_launcher, (void *)dev, "Elcus_1553usb_thread");
-  // kernel_thread((int (*)(void *))int_thread, (void *)arg,
-  //               CLONE_FILES | CLONE_FS |
-  //               CLONE_SIGHAND);
-
-kthread_run((int (*)(void *))int_thread, (void *)arg,
-            "Elcus_1553usb_thread");
+  kernel_thread((int (*)(void *))int_thread, (void *)arg,
+                CLONE_FILES | CLONE_FS |
+                CLONE_SIGHAND);
 }
+#endif
 
+#ifdef _LINUX_3_0_
+int int_thread(void * arg)
+#else
 void int_thread(struct tmk1553busb * dev)
+#endif
 {
+#ifdef _LINUX_3_0_
+  struct tmk1553busb * dev = arg;
+#endif
   int Result;
   int count;
   unsigned char num = dev->minor;
@@ -1365,7 +1521,7 @@ void int_thread(struct tmk1553busb * dev)
 #ifdef _LINUX_2_4_
                    current->p_pptr->pid
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
                    0
 #endif
                    );
@@ -1418,8 +1574,8 @@ loopmk:
                                                dev->ep6_address),
                               buffer,
                               sizeof(char) * dev->ep6_maxsize,
-                              &count,
-                              (u32)MAX_SCHEDULE_TIMEOUT);
+                              &count, 30000);
+                              //(u32)MAX_SCHEDULE_TIMEOUT);
 #ifdef TMK1553BUSB_DEBUG
         printk(KERN_INFO "Tmk1553b: Int th minor %d Res %d\n", dev->minor, Result);
 #endif
@@ -1489,8 +1645,8 @@ loopmk:
                                                dev->ep6_address),
                               buffer,
                               sizeof(char) * dev->ep6_maxsize,
-                              &count,
-                              (u32)MAX_SCHEDULE_TIMEOUT);
+                              &count, 30000);
+                              //(u32)MAX_SCHEDULE_TIMEOUT);
 
         if(Result != 0 && intth_run[num] == 1)
         {
@@ -1561,6 +1717,9 @@ exit:
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: int thread stop. minor: %d\n", dev->minor);
 #endif
+#ifdef _LINUX_3_0_
+  return 0;
+#endif
 }
 
 /*
@@ -1571,7 +1730,7 @@ exit:
 #ifdef _LINUX_2_4_
 static void tmk1553busb_disconnect(struct usb_device *udev, void *ptr)
 #endif
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
 static void tmk1553busb_disconnect(struct usb_interface *interface)
 #endif
 {
@@ -1588,22 +1747,25 @@ static void tmk1553busb_disconnect(struct usb_interface *interface)
     return;
   minor = dev->minor;
 #endif
-#ifdef _LINUX_2_6_
-  minor = interface->minor - TMK1553BUSB_MINOR_BASE;
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
+  if((interface->minor) >= usbminor)
+    minor = interface->minor - usbminor;
+  else
+    minor = interface->minor;
 #endif
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: tmk1553busb_disconnect minor %d\n", minor);
 #endif
   intth_run[minor] = 0;
 
-  LOCK_DEVICE(&__device_lock[minor]);
+  LOCK_DEVICE(&dev_lock[minor]);
 
-#ifdef _LINUX_2_6_
+#if defined(_LINUX_2_6_) || defined(_LINUX_3_0_)
   dev = minor_table[minor];
   if(dev == NULL)
     return;
   usb_set_intfdata(interface, NULL);
-#endif  
+#endif
 #ifdef CONFIG_DEVFS_FS
   /* remove our devfs node */
   devfs_unregister(dev->devfs);
@@ -1627,7 +1789,7 @@ static void tmk1553busb_disconnect(struct usb_interface *interface)
     tmkdone_usb(minor);
     tmk1553busb_delete (dev);
   }
-  UNLOCK_DEVICE(&__device_lock[minor]);
+  UNLOCK_DEVICE(&dev_lock[minor]);
 
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: USB device #%d now disconnected\n", minor);
@@ -1646,9 +1808,9 @@ static int __init tmk1553busb_init(void)
   for(result = 0; result < MAX_DEVICES; ++result)
   {
 #ifdef SPIN_LOCK_BLOCKING
-    spin_lock_init(&__device_lock[result]);
+    spin_lock_init(&dev_lock[result]);
 #else
-    sema_init(&__device_lock[result], 1);
+    sema_init(&dev_lock[result], 1);
 #endif
   }
 
@@ -1662,7 +1824,16 @@ static int __init tmk1553busb_init(void)
 #endif
   }
 
+#ifdef SPIN_LOCK_IRQ_BLOCKING
+  spin_lock_init(&list_lock);
+#else
+  sema_init(&list_lock, 1);
+#endif
+
   /* register this driver with the USB subsystem */
+#ifdef _LINUX_2_4_
+  tmk1553busb_driver.minor = usbminor;
+#endif
   result = usb_register(&tmk1553busb_driver);
   if (result < 0)
   {
@@ -1673,11 +1844,12 @@ static int __init tmk1553busb_init(void)
   }
 
   init_waitqueue_head(&wq);
+  INIT_LIST_HEAD(&hlProc);
 #ifdef TMK1553BUSB_DEBUG
   printk(KERN_INFO "tmk1553busb: usb_register success\n");
 #endif
 
-  printk(DRIVER_DESC " " DRIVER_VERSION);
+//  info(DRIVER_DESC " " DRIVER_VERSION);
   return 0;
 }
 
@@ -1847,6 +2019,8 @@ u32 TMK_tmkwaitevents(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
   int fSignal = 0;
   int tmkNumber = (int)dev->minor;
   int i;
+  TListProc *hlnProc;
+  pid_t hProc;
 
   hUserEvents = (int)(*((u32 *)(awIn)));
   for(i = 0; i < MAX_DEVICES; ++i)
@@ -1855,18 +2029,18 @@ u32 TMK_tmkwaitevents(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
       continue;
     if(i == tmkNumber)
     {
-      if(dev->curproc != current->pid)
-        hUserEvents = hUserEvents & ~(1 << i);
-      else
+//      if(dev->curproc != current->pid)
+//        hUserEvents = hUserEvents & ~(1 << i);
+//      else
         tmkMyEvents |= (dev->event) << i;
       continue;
     }//block & search
-    LOCK_DEVICE(&__device_lock[i]);
-    if(!minor_table[i] || minor_table[i]->curproc != current->pid)
+    LOCK_DEVICE(&dev_lock[i]);
+    if(!minor_table[i] /*|| minor_table[i]->curproc != current->pid*/)
       hUserEvents = hUserEvents & ~(1 << i);
     else
       tmkMyEvents |= (minor_table[i]->event) << i;
-    UNLOCK_DEVICE(&__device_lock[i]);
+    UNLOCK_DEVICE(&dev_lock[i]);
   }
 
   fWait = *((int*)(awIn+2));
@@ -1889,6 +2063,8 @@ u32 TMK_tmkwaitevents(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
   else
     timeout = 0;
 
+  hProc = current->pid;
+
   init_waitqueue_entry(&__wait, current);
   set_current_state(TASK_INTERRUPTIBLE);
   add_wait_queue(&(wq), &__wait);
@@ -1900,18 +2076,18 @@ u32 TMK_tmkwaitevents(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
         continue;
       if(i == tmkNumber)
       {
-        if(dev->curproc != current->pid)
-          hUserEvents = hUserEvents & ~(1 << i);
-        else
+//        if(dev->curproc != current->pid)
+//          hUserEvents = hUserEvents & ~(1 << i);
+//        else
           tmkMyEvents |= (dev->event) << i;
         continue;
       }//block & search
-      LOCK_DEVICE(&__device_lock[i]);
-      if(!minor_table[i] || minor_table[i]->curproc != current->pid)
+      LOCK_DEVICE(&dev_lock[i]);
+      if(!minor_table[i] /*|| minor_table[i]->curproc != current->pid*/)
         hUserEvents = hUserEvents & ~(1 << i);
       else
         tmkMyEvents |= (minor_table[i]->event) << i;
-      UNLOCK_DEVICE(&__device_lock[i]);
+      UNLOCK_DEVICE(&dev_lock[i]);
     }
 //    for(i = 0; i < MAX_DEVICES; ++i)
 //      if(hUserEvents & (1 << i))
@@ -1919,16 +2095,28 @@ u32 TMK_tmkwaitevents(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
     if (tmkMyEvents)
       break;
 
-    if (fWait > 0 && timeout == 0)
+    LOCK_LIST();
+    for (hlnProc = (TListProc*)(hlProc.next);
+         hlnProc != (TListProc*)(&hlProc);
+         hlnProc = (TListProc*)(hlnProc->ProcListEntry.next)
+        )
     {
-      break;
+      if (hlnProc->waitFlag != hProc)
+        continue;
+      hlnProc->waitFlag = 0;
+      UNLOCK_LIST();
+      goto break_wait;
     }
-    UNLOCK_DEVICE(&__device_lock[tmkNumber]);
+    UNLOCK_LIST();
+    if (fWait > 0 && timeout == 0)
+      break;
+    set_current_state(TASK_INTERRUPTIBLE);
+    UNLOCK_DEVICE(&dev_lock[tmkNumber]);
     if (fWait > 0)
       timeout = schedule_timeout(timeout);
     else
       schedule();
-    LOCK_DEVICE(&__device_lock[tmkNumber]);
+    LOCK_DEVICE(&dev_lock[tmkNumber]);
     if ((fSignal = signal_pending(current)) != 0)
     {
 #ifdef TMK1553BUSB_DEBUG
@@ -1937,6 +2125,7 @@ u32 TMK_tmkwaitevents(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
       break;
     }
   }
+break_wait:
   set_current_state(TASK_RUNNING);
   remove_wait_queue(&(wq), &__wait);
 
@@ -2809,25 +2998,14 @@ u32 TMK_rtgetmsgtime(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * aw
 u32 TMK_tmkgethwver(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf)
 {
   int tmkNumber = (int)dev->minor;
-  int ret;
 
   if (dev->curproc != current->pid)
   {
     return tmkError_usb[tmkNumber] = TMK_BAD_NUMBER;
   }
-//  return tmkgethwver(tmkNumber);
-  ret = usb_control_msg(dev->udev,
-                        usb_rcvctrlpipe(dev->udev, 0),
-                        0xb9,
-                        USB_DIR_IN,
-                        0,
-                        0,
-                        dev->fwver,
-                        2,
-                        5*HZ);
-//  return ((u16)(dev->fwver[0]) << 8) + (u16)(dev->fwver[1]);
-  return ((u16)(dev->fwver[0]) * 100) + (u16)(dev->fwver[1]);
+  return tmkgethwver_usb(tmkNumber);
 }
+
 u32 TMK_tmkgetevtime(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf)
 {
   int tmkNumber = (int)dev->minor;
@@ -2998,19 +3176,6 @@ u32 TMK_MT_GetMessage(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
   u32 dwBufSize = (u32)(*((u32 *)(awIn)));
   u8 FillFlag = (u8)(*((u32 *)(awIn + 2)));
   u16 zero[2] = {0, 0};
-  //test
-/*#ifdef TMK1553BUSB_MT_DEBUG
-  TWord = 0xABCD;
-  (u32)(*((u32 *)(awOut))) = 100;
-  printk(KERN_INFO "Tmk1553b: TMK_MT_GetMessage Sz %d flag %d\n", dwBufSize, FillFlag);
-    __copy_to_user((u16 *)(*((u32 *)(awIn + 4))) + 0,
-                           &TWord,
-                           2);
-  return 2;
-#endif
-
-  */
-  //test
 
   if (dev->curproc != current->pid)
   {
@@ -3292,4 +3457,42 @@ u32 TMK_mbcfree(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf)
   }
   mbcfree_usb(awIn[0]);
   return tmkError_usb[tmkNumber];
+}
+
+u32 TMK_tmkwaiteventsflag(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf)
+{
+  int flag = *((int *)awIn + 1);
+  TListProc *hlnProc;
+  pid_t hProc = current->pid;
+  pid_t hMainProc = *((int *)awIn);
+
+  LOCK_LIST();
+  for (hlnProc = (TListProc*)(hlProc.next);
+       hlnProc != (TListProc*)(&hlProc);
+       hlnProc = (TListProc*)(hlnProc->ProcListEntry.next)
+      )
+  {
+    if (hlnProc->hProc != hProc)
+      continue;
+    if(flag)
+    {
+      hlnProc->waitFlag = hMainProc;
+      wake_up_interruptible(&wq);
+    }
+    else
+      hlnProc->waitFlag = 0;
+    break;
+  }
+  UNLOCK_LIST();
+  return 0;
+}
+u32 TMK_tmkreadsn(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * awBuf)
+{
+  int tmkNumber = (int)dev->minor;
+
+  if (dev->curproc != current->pid)
+  {
+    return tmkError_usb[tmkNumber] = TMK_BAD_NUMBER;
+  }
+  return dev->SerialNumber;
 }
