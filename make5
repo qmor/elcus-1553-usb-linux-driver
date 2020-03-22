@@ -1,0 +1,4 @@
+rm -f Makefile
+ln Makefile3 Makefile
+make -C /lib/modules/`uname -r`/build M=$PWD ARCH=x86_64 modules
+rm -v Makefile .*.cmd *.o *.mod.c *.symvers #*.ko 
