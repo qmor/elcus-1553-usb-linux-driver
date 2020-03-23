@@ -17,7 +17,7 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/unistd.h>
-#include <linux/signal.h>
+
 #include <linux/errno.h>
 #include <linux/poll.h>
 #include <linux/init.h>
@@ -38,7 +38,10 @@
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
 #error Unsupported Kernel Version!
 #endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#define _LINUX_5_0_
+#define _LINUX_3_0_
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0)
 #define _LINUX_3_0_
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
 #define _LINUX_2_6_
@@ -50,6 +53,12 @@ MODULE_LICENSE("GPL");
 #endif
 #ifdef CONFIG_64BIT
 #define __64BIT__
+#endif
+
+#ifdef _LINUX_5_0_
+  #include <linux/sched/signal.h>
+#else
+  #include <linux/signal.h>
 #endif
 
 #ifdef _LINUX_3_0_
@@ -788,9 +797,18 @@ static int tmk1553busb_ioctl (struct inode *inode, struct file *filp, unsigned i
   dwService = _IOC_NR(cmd);
   if (dwService > MAX_TMK_API) return -ENOTTY;
   if (_IOC_DIR(cmd) & _IOC_READ)
-    err = !access_ok(VERIFY_WRITE, (void *)arg, _IOC_SIZE(cmd));
+    #ifdef _LINUX_5_0_
+      err = !access_ok((void *)arg, _IOC_SIZE(cmd));
+    #else
+      err = !access_ok(VERIFY_WRITE, (void *)arg, _IOC_SIZE(cmd));
+    #endif
+    
   else if (_IOC_DIR(cmd) & _IOC_WRITE)
-    err = !access_ok(VERIFY_READ, (void *)arg, _IOC_SIZE(cmd));
+    #ifdef _LINUX_5_0_
+      err = !access_ok((void *)arg, _IOC_SIZE(cmd));
+    #else
+      err = !access_ok(VERIFY_READ, (void *)arg, _IOC_SIZE(cmd));
+    #endif
   if (err) return -EFAULT;
 
   if (_IOC_DIR(cmd) & _IOC_WRITE)
@@ -2015,7 +2033,11 @@ u32 TMK_tmkwaitevents(struct tmk1553busb * dev, u16 * awIn, u16 * awOut, u16 * a
   int fWait;
   int tmkMyEvents = 0;
   long timeout;
-  wait_queue_t __wait;
+  #ifdef _LINUX_5_0_
+    wait_queue_entry_t __wait;
+  #else
+    wait_queue_t __wait;
+  #endif
   int fSignal = 0;
   int tmkNumber = (int)dev->minor;
   int i;
